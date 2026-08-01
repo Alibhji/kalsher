@@ -138,6 +138,12 @@ class WsManager:
             if archived:
                 await client.send_json({"t": "archived", "tickers": archived})
 
+    async def on_trade(self, trade: dict[str, Any]) -> None:
+        if not trade:
+            return
+        for client in self.clients:
+            await client.send_json({"t": "tr", "trades": [trade]})
+
     async def on_tick(self, ticker: str) -> None:
         if self.settings.market_flush_ms != 0:
             return

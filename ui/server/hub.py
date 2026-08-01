@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from common.liquidity import market_has_liquidity
+from common.trade_flow import trade_signed_usd
 
 from ui.server.markets import _derived_no_cents, _is_live, _kalshi_url, _event_kalshi_url, _parse_decimal, _price_cents
 
@@ -114,6 +115,26 @@ class MarketHub:
         state.row = row
         self._touch(ticker)
         return True
+
+    def apply_trade(self, ticker: str, payload: dict[str, Any], *, frame_ts: Any = None) -> dict[str, Any] | None:
+        if self._markets.get(ticker) is None:
+            return None
+        signed = trade_signed_usd(payload)
+        if signed is None:
+            return None
+        price = _parse_decimal(payload.get("price"))
+        count = _parse_decimal(payload.get("count"))
+        ts = _parse_dt(frame_ts) or datetime.now(timezone.utc)
+        trade_id = payload.get("trade_id")
+        return {
+            "ticker": ticker,
+            "trade_id": str(trade_id) if trade_id is not None else None,
+            "taker_side": payload.get("taker_side"),
+            "signed_usd": round(signed, 2),
+            "price_cents": _price_cents(price),
+            "count": float(count) if count is not None else None,
+            "ts": ts.isoformat(),
+        }
 
     def apply_market_meta(self, ticker: str, payload: dict[str, Any]) -> bool:
         market = payload.get("market") or {}

@@ -1,4 +1,5 @@
 import type { MarketRow } from "../api";
+import { tradeStore, type TradePrint } from "./tradeStore";
 
 type QuoteUpdate = Partial<MarketRow> & { ticker: string };
 
@@ -8,6 +9,7 @@ type WsMessage =
   | { t: "add"; markets: MarketRow[]; t_send?: number }
   | { t: "rm"; tickers: string[]; t_send?: number }
   | { t: "archived"; tickers?: string[]; t_send?: number }
+  | { t: "tr"; trades: TradePrint[]; t_send?: number }
   | { t: "pong"; client_t?: number };
 
 type Listener = () => void;
@@ -170,6 +172,11 @@ class MarketStore {
     }
     if (msg.t === "rm") {
       this.removeTickers(msg.tickers);
+      tradeStore.clearTickers(msg.tickers);
+      return;
+    }
+    if (msg.t === "tr") {
+      tradeStore.pushTrades(msg.trades);
       return;
     }
     if (msg.t === "archived") {

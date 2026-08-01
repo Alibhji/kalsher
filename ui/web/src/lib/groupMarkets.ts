@@ -19,6 +19,7 @@ export type EventGroup = {
   eventTicker: string;
   eventTitle: string;
   eventKalshiUrl: string | null;
+  openTime: string | null;
   closeTime: string | null;
   secondsToClose: number | null;
   isLive: boolean;
@@ -124,6 +125,7 @@ export function groupMarkets(
         eventTicker,
         eventTitle: head.event_title || head.title || eventTicker,
         eventKalshiUrl: head.event_kalshi_url,
+        openTime: head.open_time,
         closeTime: head.close_time,
         secondsToClose: head.seconds_to_close,
         isLive: rows.some((r) => r.is_live),

@@ -42,3 +42,34 @@ body {
 .live-dot {
   animation: pulse-dot 1.6s ease-in-out infinite;
 }
+
+.market-rules-md h2 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.market-rules-md p {
+  margin: 0 0 0.75rem;
+  color: #cbd5e1;
+}
+
+.market-rules-md p:last-child {
+  margin-bottom: 0;
+}
+
+.market-rules-md a {
+  color: #2dd4bf;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.market-rules-md a:hover {
+  color: #5eead4;
+}
+
+.market-rules-md strong {
+  color: #f8fafc;
+  font-weight: 600;
+}

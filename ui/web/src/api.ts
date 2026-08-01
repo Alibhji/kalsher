@@ -46,6 +46,16 @@ export type MarketHistory = {
   closed?: boolean;
 };
 
+export type TradePrint = {
+  ticker: string;
+  trade_id: string | null;
+  taker_side: string | null;
+  signed_usd: number;
+  price_cents: number | null;
+  count: number | null;
+  ts: string;
+};
+
 export type ArchivePeriod = {
   event_ticker: string;
   event_title: string | null;
@@ -119,6 +129,40 @@ export async function fetchMarketHistory(ticker: string, since?: string): Promis
     throw new Error(`Failed to load history (${res.status})`);
   }
   return res.json() as Promise<MarketHistory>;
+}
+
+export async function fetchMarketTrades(
+  ticker: string,
+  opts?: { since?: string; limit?: number },
+): Promise<TradePrint[]> {
+  const params = new URLSearchParams();
+  if (opts?.since) params.set("since", opts.since);
+  params.set("limit", String(opts?.limit ?? 5000));
+  const qs = params.toString();
+  const res = await fetch(`/api/markets/${encodeURIComponent(ticker)}/trades?${qs}`);
+  if (!res.ok) {
+    throw new Error(`Failed to load trades (${res.status})`);
+  }
+  const payload = (await res.json()) as { trades: TradePrint[] };
+  return payload.trades;
+}
+
+export type MarketRules = {
+  ticker: string;
+  markdown: string;
+  yes_sub_title?: string | null;
+  rules_primary?: string | null;
+  rules_secondary?: string | null;
+  expiration_value?: string | null;
+  settlement_sources?: Array<{ name?: string; url?: string }> | null;
+};
+
+export async function fetchMarketRules(ticker: string): Promise<MarketRules> {
+  const res = await fetch(`/api/markets/${encodeURIComponent(ticker)}/rules`);
+  if (!res.ok) {
+    throw new Error(`Failed to load market rules (${res.status})`);
+  }
+  return res.json() as Promise<MarketRules>;
 }
 
 export async function fetchArchiveTree(series?: string, limit = 30): Promise<ArchiveSeries[]> {

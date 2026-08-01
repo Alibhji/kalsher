@@ -38,6 +38,7 @@ class LiveFeed:
         self._decoder = msgspec.msgpack.Decoder()
         self._running = False
         self._on_tick: Any | None = None
+        self._on_trade: Any | None = None
         self._on_structure_change: StructureCallback | None = None
         self.messages_received = 0
         self.last_message_at: datetime | None = None
@@ -55,6 +56,9 @@ class LiveFeed:
 
     def set_on_tick(self, callback: Any) -> None:
         self._on_tick = callback
+
+    def set_on_trade(self, callback: Any) -> None:
+        self._on_trade = callback
 
     def set_on_structure_change(self, callback: StructureCallback | None) -> None:
         self._on_structure_change = callback
@@ -153,6 +157,10 @@ class LiveFeed:
         if kind == "tick":
             if self._hub.apply_tick(ticker, payload) and self._on_tick:
                 asyncio.create_task(self._on_tick(ticker))
+        elif kind == "trade":
+            trade = self._hub.apply_trade(ticker, payload, frame_ts=frame.get("source_ts") or frame.get("ts"))
+            if trade and self._on_trade:
+                asyncio.create_task(self._on_trade(trade))
         elif kind == "market_meta":
             was_new = self._hub.get_row(ticker) is None
             if self._hub.apply_market_meta(ticker, payload):

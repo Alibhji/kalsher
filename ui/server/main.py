@@ -18,6 +18,8 @@ from ui.server.history import fetch_market_history
 from ui.server.hub import MarketHub
 from ui.server.maintenance import CONFIRM_PHRASE, reset_platform
 from ui.server.markets import fetch_markets
+from ui.server.rules import fetch_market_rules
+from ui.server.trades import fetch_trades_for_ticker, parse_since_param
 from ui.server.ws import WsManager
 
 log = get_logger(__name__)
@@ -51,6 +53,7 @@ class UiApp:
         )
         self._ws_manager = WsManager(self._hub, self.settings)
         self._feed.set_on_tick(self._ws_manager.on_tick)
+        self._feed.set_on_trade(self._ws_manager.on_trade)
         self._feed.set_on_structure_change(self._ws_manager.on_structure_change)
 
         app = web.Application()
@@ -59,6 +62,8 @@ class UiApp:
         app.router.add_get("/ws", self._ws)
         app.router.add_get("/api/markets", self._api_markets)
         app.router.add_get("/api/markets/{ticker}/history", self._api_history)
+        app.router.add_get("/api/markets/{ticker}/trades", self._api_trades)
+        app.router.add_get("/api/markets/{ticker}/rules", self._api_rules)
         app.router.add_get("/api/archive/tree", self._api_archive_tree)
         app.router.add_get("/api/archive/events", self._api_archive_events)
         app.router.add_get("/api/archive/events/{event_ticker}/markets", self._api_archive_event_markets)
@@ -154,6 +159,25 @@ class UiApp:
         if history is None:
             raise web.HTTPNotFound(text="Market not found")
         return web.json_response(history)
+
+    async def _api_trades(self, request: web.Request) -> web.Response:
+        assert self._pool is not None
+        ticker = request.match_info["ticker"]
+        limit = int(request.query.get("limit", "5000"))
+        since_raw = request.query.get("since")
+        since = parse_since_param(since_raw) if since_raw else None
+        if since_raw and since is None:
+            raise web.HTTPBadRequest(text="Invalid since timestamp")
+        trades = await fetch_trades_for_ticker(self._pool, ticker, since=since, limit=limit)
+        return web.json_response({"ticker": ticker, "since": since_raw, "trades": trades})
+
+    async def _api_rules(self, request: web.Request) -> web.Response:
+        assert self._redis is not None and self._pool is not None
+        ticker = request.match_info["ticker"]
+        rules = await fetch_market_rules(self._redis, self._pool, ticker)
+        if rules is None:
+            raise web.HTTPNotFound(text="Market rules not found")
+        return web.json_response(rules)
 
     async def _api_archive_tree(self, request: web.Request) -> web.Response:
         assert self._pool is not None
