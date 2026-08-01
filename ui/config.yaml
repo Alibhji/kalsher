@@ -1,0 +1,19 @@
+kalshi_web_base: https://kalshi.com
+drop_no_liquidity: false
+live_only: true
+archive_default_limit: 30
+history_windows:
+  - 5m
+  - 15m
+  - 1h
+symbol_map:
+  KXBTC15M: BRTI
+  KXBTCD: BRTI
+  KXETH15M: ETHUSDRTI
+  KXETHD: ERTI
+  KXDOGE15M: DOGEUSDRTI
+  KXBNB15M: BNBUSDRTI
+  KXSOL15M: SOLUSDRTI
+  KXSOLD: SOLUSD_RTI
+  KXHYPE15M: HYPEUSDRTI
+  KXXRP15M: XRPUSDRTI

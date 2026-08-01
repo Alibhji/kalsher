@@ -1,0 +1,55 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+kalshi.pem
+secrets/*.pem
+secrets/*.key
+*.pem
+!secrets/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+*.log
+
+# Node / frontend
+node_modules/
+ui/web/node_modules/
+ui/web/dist/
+*.tsbuildinfo
+.npm
+.pnpm-debug.log*
+
+# IDE & OS
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Docker / local scratch
+docker-compose.override.yml
+*.local.yaml
+
+# Misc local notes
+forme.txt

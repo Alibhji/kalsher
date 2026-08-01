@@ -1,0 +1,35 @@
+filters:
+  series_allowlist:
+    - KXBTC15M
+    - KXETH15M
+    - KXDOGE15M
+    - KXBNB15M
+    - KXSOL15M
+    - KXHYPE15M
+    - KXXRP15M
+    - KXBTCD
+    - KXETHD
+    - KXSOLD
+  live_event_only: true
+  enabled_filters:
+    - status_active
+    - series_allowlist
+
+channels:
+  - ticker
+  - trade
+  - orderbook_delta
+  - market_lifecycle_v2
+  - pyth_value
+  - cfbenchmarks_value
+
+discovery_interval_sec: 15
+rest_rps: 10
+ws_shards: 4
+ws_queue_size: 10000
+sink_batch_size: 1000
+sink_flush_ms: 100
+
+# Unbatched pub/sub lane on kalshi:live for the UI gateway. Bypasses the
+# sink_flush_ms batcher so the terminal is not stuck behind write batching.
+ui_fanout: true
