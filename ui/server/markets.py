@@ -9,7 +9,8 @@ from typing import Any
 import asyncpg
 import redis.asyncio as aioredis
 
-from common.liquidity import market_has_liquidity
+from common.liquidity import market_has_liquidity_dollars
+from common.prices import quote_row_from_yes_dollars
 
 UNIVERSE_KEY = "kalshi:universe"
 
@@ -163,10 +164,13 @@ def _serialize_row(row: dict[str, Any], web_base: str) -> dict[str, Any]:
 
     yes_bid = row.get("yes_bid_cents")
     yes_ask = row.get("yes_ask_cents")
-    no_bid, no_ask = _derived_no_cents(yes_bid, yes_ask)
+    no_bid = row.get("no_bid_cents")
+    no_ask = row.get("no_ask_cents")
     is_live = _is_live(row, now)
     volume = row.get("volume")
-    has_liquidity = market_has_liquidity(yes_bid, yes_ask, volume_usd=volume)
+    yes_bid_d = _parse_decimal(row.get("yes_bid_dollars"))
+    yes_ask_d = _parse_decimal(row.get("yes_ask_dollars"))
+    has_liquidity = market_has_liquidity_dollars(yes_bid_d, yes_ask_d, volume_usd=volume)
 
     out: dict[str, Any] = {
         "ticker": row["ticker"],
@@ -254,6 +258,7 @@ async def fetch_markets(
         yes_ask = _parse_decimal(raw.get("yes_ask")) or _parse_decimal(market_json.get("yes_ask_dollars"))
         volume = _merge_volume(raw, market_json)
         oi = _merge_open_interest(raw, market_json)
+        quotes = quote_row_from_yes_dollars(yes_bid, yes_ask)
 
         row: dict[str, Any] = {
             "ticker": ticker,
@@ -269,8 +274,9 @@ async def fetch_markets(
             "floor_strike": floor,
             "cap_strike": cap,
             "strike_type": card["strike_type"] if card else market_json.get("strike_type"),
-            "yes_bid_cents": _price_cents(yes_bid),
-            "yes_ask_cents": _price_cents(yes_ask),
+            **quotes,
+            "yes_bid_dollars": yes_bid,
+            "yes_ask_dollars": yes_ask,
             "volume": volume,
             "open_interest": oi,
         }

@@ -174,8 +174,11 @@ class PaperEngine:
         )
         return True
 
-    async def cancel_order(self, order: dict[str, Any]) -> dict[str, Any]:
-        return await self.store.update_order(order["id"], status="cancelled") or order
+    async def cancel_order(self, order: dict[str, Any], *, reason: str | None = None) -> dict[str, Any]:
+        fields: dict[str, Any] = {"status": "cancelled"}
+        if reason:
+            fields["reason"] = reason
+        return await self.store.update_order(order["id"], **fields) or order
 
     async def check_open_limits(self) -> None:
         orders = await self.store.list_open_orders()

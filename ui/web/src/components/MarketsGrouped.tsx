@@ -1,7 +1,7 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import type { MarketRow } from "../api";
-import { groupMarkets, type EventGroup, type SeriesGroup } from "../lib/groupMarkets";
-import { marketHasLiquidity } from "../lib/filters";
+import { groupMarkets, parseVolume, type EventGroup, type SeriesGroup } from "../lib/groupMarkets";
+import { marketHasLiquidity, marketHasQuotes } from "../lib/filters";
 import { useMarketRow, useLiveGroupVolume } from "../store/useMarketStore";
 import { tradingStore } from "../store/tradingStore";
 import { useTradingFocus } from "../store/useTradingStore";
@@ -13,6 +13,7 @@ import {
   formatVolume,
 } from "../lib/format";
 import { KalshiLink } from "./KalshiLink";
+import { BetDetailModal } from "./BetDetailModal";
 import { MarketChart } from "./MarketChart";
 import { useNowMs } from "../lib/useNow";
 
@@ -99,6 +100,7 @@ export function MarketsGrouped({
   const [expandedSeries, setExpandedSeries] = useState<Set<string>>(() => new Set());
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(() => new Set());
   const [expandedChart, setExpandedChart] = useState<string | null>(null);
+  const [modalTicker, setModalTicker] = useState<string | null>(null);
   const [groupsInitialized, setGroupsInitialized] = useState(false);
   const { focusTicker, focusSeq } = useTradingFocus();
   const lastHandledFocus = useRef(0);
@@ -171,6 +173,18 @@ export function MarketsGrouped({
     });
   }, [groupStructureKey]);
 
+  function openBetModal(ticker: string) {
+    setModalTicker(ticker);
+    setExpandedChart(ticker);
+    tradingStore.setSelectedTicker(ticker);
+    tradingStore.focusMarket(ticker);
+  }
+
+  const modalFallback = useMemo(
+    () => (modalTicker ? markets.find((m) => m.ticker === modalTicker) ?? null : null),
+    [modalTicker, markets],
+  );
+
   function toggleSeries(seriesTicker: string) {
     const series = groups.find((g) => g.seriesTicker === seriesTicker);
     if (!series) return;
@@ -228,6 +242,7 @@ export function MarketsGrouped({
   }
 
   return (
+    <>
     <div
       className={`overflow-hidden rounded-lg border border-ink-800 bg-ink-900/90 shadow-lg shadow-black/20 transition-opacity duration-300 ${
         visible ? "opacity-100 animate-fade-in" : "opacity-0"
@@ -283,16 +298,24 @@ export function MarketsGrouped({
                   setExpandedChart(next);
                   tradingStore.setSelectedTicker(next);
                 }}
+                onOpenModal={openBetModal}
               />
             ))}
           </tbody>
         </table>
       </div>
       <p className="border-t border-ink-800 px-4 py-2 text-xs text-ink-500">
-        Grouped like Kalshi crypto calendar — series → event → strike rows. Expanding a series
-        expands all its events and strikes; collapsing it hides them all.
+        Grouped like Kalshi crypto calendar — series → event → strike rows. Click a row to expand
+        the chart inline; double-click to maximize. Expanding a series expands all its events and
+        strikes; collapsing it hides them all.
       </p>
     </div>
+    <BetDetailModal
+      ticker={modalTicker}
+      fallback={modalFallback}
+      onClose={() => setModalTicker(null)}
+    />
+    </>
   );
 }
 
@@ -304,6 +327,7 @@ type SeriesSectionProps = {
   onToggleSeries: () => void;
   onToggleEvent: (eventTicker: string) => void;
   onToggleChart: (ticker: string) => void;
+  onOpenModal: (ticker: string) => void;
 };
 
 function SeriesSection({
@@ -314,6 +338,7 @@ function SeriesSection({
   onToggleSeries,
   onToggleEvent,
   onToggleChart,
+  onOpenModal,
 }: SeriesSectionProps) {
   const liveVolume = useLiveGroupVolume(series.tickers);
 
@@ -349,6 +374,7 @@ function SeriesSection({
               expandedChart={expandedChart}
               onToggleEvent={() => onToggleEvent(event.eventTicker)}
               onToggleChart={onToggleChart}
+              onOpenModal={onOpenModal}
             />
           ))
         : null}
@@ -362,6 +388,7 @@ type EventSectionProps = {
   expandedChart: string | null;
   onToggleEvent: () => void;
   onToggleChart: (ticker: string) => void;
+  onOpenModal: (ticker: string) => void;
 };
 
 function EventSection({
@@ -370,6 +397,7 @@ function EventSection({
   expandedChart,
   onToggleEvent,
   onToggleChart,
+  onOpenModal,
 }: EventSectionProps) {
   const illiquidCount = event.strikeCount - event.liquidCount;
   const noLiquidity = event.liquidCount === 0;
@@ -425,6 +453,7 @@ function EventSection({
               stripe={i % 2 === 0}
               expandedChart={expandedChart === market.ticker}
               onToggleChart={() => onToggleChart(market.ticker)}
+              onOpenModal={() => onOpenModal(market.ticker)}
             />
           ))
         : null}
@@ -437,6 +466,7 @@ type MarketRowViewProps = {
   stripe: boolean;
   expandedChart: boolean;
   onToggleChart: () => void;
+  onOpenModal: () => void;
 };
 
 /** Owns the ticking clock so it re-renders alone, not the whole row. */
@@ -471,28 +501,63 @@ function LiveQuoteCells({ live }: { live: MarketRow }) {
   );
 }
 
-function MarketRowView({ market, stripe, expandedChart, onToggleChart }: MarketRowViewProps) {
+function MarketRowView({ market, stripe, expandedChart, onToggleChart, onOpenModal }: MarketRowViewProps) {
   const live = useMarketRow(market.ticker) ?? market;
   const label = live.title || live.event_title || live.ticker;
   const liquid = marketHasLiquidity(live);
+  const canChart =
+    liquid ||
+    marketHasQuotes(live) ||
+    parseVolume(live.volume) > 0;
+  const clickTimerRef = useRef<number | null>(null);
+
+  function handleClick() {
+    if (!canChart) return;
+    window.clearTimeout(clickTimerRef.current ?? undefined);
+    clickTimerRef.current = window.setTimeout(() => {
+      onToggleChart();
+    }, 220);
+  }
+
+  function handleDoubleClick(e: MouseEvent) {
+    if (!canChart) return;
+    e.preventDefault();
+    window.clearTimeout(clickTimerRef.current ?? undefined);
+    onOpenModal();
+  }
+
+  useEffect(() => {
+    return () => window.clearTimeout(clickTimerRef.current ?? undefined);
+  }, []);
 
   return (
     <Fragment>
       <tr
-        onClick={liquid ? onToggleChart : undefined}
-        aria-disabled={!liquid}
+        onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
+        aria-disabled={!canChart}
+        title={canChart ? "Click to expand chart · double-click to maximize" : undefined}
         className={`border-b border-ink-800/60 transition-colors ${
-          !liquid
+          !canChart
             ? "cursor-not-allowed bg-ink-950/50 opacity-45"
-            : expandedChart
-              ? "cursor-pointer bg-accent/10 hover:bg-accent/10"
-              : `cursor-pointer hover:bg-accent/10 ${stripe ? "bg-ink-900/40" : "bg-ink-950/30"}`
+            : !liquid
+              ? "cursor-pointer opacity-80 hover:bg-accent/5"
+              : expandedChart
+                ? "cursor-pointer bg-accent/10 hover:bg-accent/10"
+                : `cursor-pointer hover:bg-accent/10 ${stripe ? "bg-ink-900/40" : "bg-ink-950/30"}`
         }`}
       >
         <td className="px-4 py-2 pl-16">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs text-ink-400">{live.ticker}</span>
-            {!liquid ? (
+            {!liquid && canChart ? (
+              <span
+                className="rounded border border-amber-900/50 bg-amber-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-400/90"
+                title="Quotes visible but neither side meets trade filters (volume or spread)"
+              >
+                thin book
+              </span>
+            ) : !liquid ? (
               <span className="rounded border border-ink-700 bg-ink-900 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
                 no liquidity
               </span>
@@ -515,7 +580,7 @@ function MarketRowView({ market, stripe, expandedChart, onToggleChart }: MarketR
           <KalshiLink url={live.kalshi_url} />
         </td>
       </tr>
-      {expandedChart && liquid ? (
+      {expandedChart && canChart ? (
         <tr id={`market-chart-anchor-${live.ticker}`} className="bg-ink-950">
           <td colSpan={7} className="p-0">
             <MarketChart

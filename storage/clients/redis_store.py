@@ -31,6 +31,7 @@ def _json_default(obj: Any) -> Any:
 
 class RedisStore:
     UNIVERSE_KEY = "kalshi:universe"
+    SETTLE_CHANNEL = "trading:settle"
 
     def __init__(self, url: str) -> None:
         self._url = url
@@ -82,6 +83,10 @@ class RedisStore:
 
     async def clear_book_stale(self, ticker: str) -> None:
         await self.client.hdel(f"kalshi:market:{ticker}", "book_stale")
+
+    async def publish_settle(self, ticker: str) -> None:
+        """Tell the trader to settle open positions for this ticker immediately."""
+        await self.client.publish(self.SETTLE_CHANNEL, ticker)
 
     async def write_events(self, events: list[NormalizedEvent]) -> None:
         if not events:

@@ -12,11 +12,26 @@ export function formatUsd(value: number | null | undefined): string {
   return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+/** Kalshi-style average price (e.g. 75.24¢, 0.1¢). */
+export function formatPreviewCents(cents: number | null | undefined): string {
+  if (cents == null) return "—";
+  if (Math.abs(cents - Math.round(cents)) < 0.001) return `${Math.round(cents)}¢`;
+  return `${cents.toFixed(2)}¢`;
+}
+
+export function formatCloseDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 export function formatCents(bid: number | null, ask: number | null): string {
+  const fmt = (v: number) => (Number.isInteger(v) ? `${v}¢` : `${v.toFixed(1)}¢`);
   if (bid == null && ask == null) return "—";
-  if (bid != null && ask != null) return `${bid}¢ / ${ask}¢`;
-  if (bid != null) return `${bid}¢`;
-  return `${ask}¢`;
+  if (bid != null && ask != null) return `${fmt(bid)} / ${fmt(ask)}`;
+  if (bid != null) return fmt(bid);
+  return fmt(ask!);
 }
 
 export function formatStrike(floor: number | null, cap: number | null): string {

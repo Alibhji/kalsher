@@ -294,13 +294,14 @@ async def apply_settlement(
     side: str,
     price: Decimal,
     qty: Decimal,
-) -> None:
+    mode: str = "paper",
+) -> UUID:
     """Close an expired/settled position at the market result price."""
     order_id = await conn.fetchval(
         """
         INSERT INTO trading.orders
             (experiment_id, ticker, side, action, type, limit_price, qty, filled_qty, mode, status, reason)
-        VALUES ($1, $2, $3, 'sell', 'market', $4, $5, 0, 'live', 'filled', 'settlement')
+        VALUES ($1, $2, $3, 'sell', 'market', $4, $5, 0, $6, 'filled', 'settlement')
         RETURNING id
         """,
         experiment_id,
@@ -308,6 +309,7 @@ async def apply_settlement(
         side,
         price,
         qty,
+        mode,
     )
     await apply_fill(
         conn,
@@ -322,6 +324,7 @@ async def apply_settlement(
         liquidity="settlement",
         exit_kind="settlement",
     )
+    return order_id
 
 
 async def apply_settlement_tx(
@@ -332,14 +335,16 @@ async def apply_settlement_tx(
     side: str,
     price: Decimal,
     qty: Decimal,
-) -> None:
+    mode: str = "paper",
+) -> UUID:
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await apply_settlement(
+            return await apply_settlement(
                 conn,
                 experiment_id=experiment_id,
                 ticker=ticker,
                 side=side,
                 price=price,
                 qty=qty,
+                mode=mode,
             )

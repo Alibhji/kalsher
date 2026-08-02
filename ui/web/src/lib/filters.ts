@@ -82,7 +82,12 @@ export function isMarketLive(m: MarketRow, nowMs: number): boolean {
 
 export function marketHasQuotes(m: MarketRow): boolean {
   if (m.has_quotes != null) return m.has_quotes;
-  return m.yes_bid_cents != null || m.yes_ask_cents != null;
+  return (
+    m.yes_bid_cents != null ||
+    m.yes_ask_cents != null ||
+    m.no_bid_cents != null ||
+    m.no_ask_cents != null
+  );
 }
 
 export function marketHasLiquidity(m: MarketRow): boolean {

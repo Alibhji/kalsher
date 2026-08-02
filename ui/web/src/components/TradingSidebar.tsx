@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   tradeLabel,
   type Order,
@@ -6,10 +6,19 @@ import {
   type TradeAction,
   type TradeSide,
 } from "../api/trading";
-import { formatUsd } from "../lib/format";
+import { formatCloseDate, formatPreviewCents, formatUsd } from "../lib/format";
+import {
+  computeDefaultLimitPrice,
+  computeOrderPreview,
+  DEFAULT_LIMIT_OFFSET,
+  formatLimitPrice,
+  referenceMarketPrice,
+  resolveOrderPrice,
+} from "../lib/orderPreview";
 import {
   canAffordOrder,
   estimateOrderCostUsd,
+  liveAvailableFunds,
   liveFundsBanner,
   parseTradingError,
 } from "../lib/tradingAlerts";
@@ -17,7 +26,8 @@ import { experimentReturn, formatPnl, formatPnlPct, pnlColorClass, pnlPctFromBas
 import { parseTagInput, TagEditor } from "./TagList";
 import { notifyError, notifyWarning } from "../store/notificationStore";
 import { tradingStore } from "../store/tradingStore";
-import { useTradingStore } from "../store/useTradingStore";
+import { useTradingField, useTradingStore } from "../store/useTradingStore";
+import { useMarketRow } from "../store/useMarketStore";
 
 type Props = {
   mobileOpen?: boolean;
@@ -44,6 +54,8 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
   const [orderType, setOrderType] = useState<OrderType>("market");
   const [qty, setQty] = useState("10");
   const [limitPrice, setLimitPrice] = useState("0.50");
+  const [limitOffset, setLimitOffset] = useState(String(DEFAULT_LIMIT_OFFSET));
+  const limitPriceManual = useRef(false);
   const [confirmLive, setConfirmLive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -53,6 +65,13 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
   const [savingTags, setSavingTags] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [closedOnly, setClosedOnly] = useState(false);
+  const [showOrderPreview, setShowOrderPreview] = useState(() => {
+    try {
+      return localStorage.getItem("polymarketer.showOrderPreview") !== "0";
+    } catch {
+      return true;
+    }
+  });
 
   const openPositions = (profile?.positions ?? []).filter((p) => Number(p.qty) > 0);
   // Closed trades can sit far down the chronological list, so the P&L view is not capped.
@@ -63,7 +82,16 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
     return pos ? Number(pos.qty) : 0;
   }
 
+  function orderRemainingQty(order: Order): number {
+    return Number(order.qty) - Number(order.filled_qty);
+  }
+
+  function isRestingLimit(order: Order): boolean {
+    return order.type === "limit" && orderRemainingQty(order) > 0;
+  }
+
   function closeLabel(order: Order): string {
+    if (isRestingLimit(order)) return "Cancel";
     const held = positionQty(order.ticker, order.side);
     if (held > 0) {
       return order.action === "buy" ? "Sell" : "Buy";
@@ -82,8 +110,149 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
 
   const isLive = active?.mode === "live";
   const ticker = selectedTicker ?? "";
+  const heldQty = ticker ? positionQty(ticker, side) : 0;
+  const canSell = heldQty > 0;
+
+  function selectSellAll(nextSide: TradeSide = side) {
+    const held = ticker ? positionQty(ticker, nextSide) : 0;
+    if (held <= 0) return;
+    setAction("sell");
+    setQty(String(held));
+  }
+
+  function handleActionChange(next: TradeAction) {
+    resetLimitPriceTracking();
+    if (next === "sell") {
+      if (!canSell) return;
+      selectSellAll();
+      return;
+    }
+    setAction("buy");
+  }
+
+  function handleSideChange(next: TradeSide) {
+    resetLimitPriceTracking();
+    setSide(next);
+    if (action !== "sell") return;
+    const held = ticker ? positionQty(ticker, next) : 0;
+    if (held > 0) {
+      setQty(String(held));
+    } else {
+      setAction("buy");
+    }
+  }
+
+  function focusPosition(posTicker: string, posSide: TradeSide, posQty: number) {
+    resetLimitPriceTracking();
+    tradingStore.prepareTrade(posTicker, posSide, "sell", posQty);
+  }
+
+  const tradeSetupSeq = useTradingField("tradeSetupSeq");
+  useEffect(() => {
+    const setup = tradingStore.getTradeSetup();
+    if (!setup) return;
+    resetLimitPriceTracking();
+    setSide(setup.side);
+    setAction(setup.action);
+    setQty(setup.qty);
+  }, [tradeSetupSeq]);
+
+  useEffect(() => {
+    if (action !== "sell" || !ticker) return;
+    if (heldQty > 0) {
+      setQty(String(heldQty));
+    } else {
+      setAction("buy");
+    }
+  }, [ticker]); // eslint-disable-line react-hooks/exhaustive-deps -- reset sell qty when switching markets
+
+  const market = useMarketRow(ticker);
+  const qtyNum = Number(qty);
+  const limitNum = Number(limitPrice);
+  const limitOffsetNum = Number(limitOffset);
+  const referencePrice = useMemo(
+    () => referenceMarketPrice(side, action, market),
+    [side, action, market],
+  );
+  const suggestedLimitPrice = useMemo(
+    () =>
+      computeDefaultLimitPrice(
+        side,
+        action,
+        market,
+        Number.isFinite(limitOffsetNum) ? limitOffsetNum : DEFAULT_LIMIT_OFFSET,
+      ),
+    [side, action, market, limitOffsetNum],
+  );
+
+  function applySuggestedLimitPrice() {
+    if (suggestedLimitPrice == null) return;
+    limitPriceManual.current = false;
+    setLimitPrice(formatLimitPrice(suggestedLimitPrice));
+  }
+
+  function resetLimitPriceTracking() {
+    limitPriceManual.current = false;
+  }
+
+  useEffect(() => {
+    resetLimitPriceTracking();
+  }, [ticker, side, action, orderType]);
+
+  useEffect(() => {
+    if (orderType !== "limit" || limitPriceManual.current || suggestedLimitPrice == null) return;
+    setLimitPrice(formatLimitPrice(suggestedLimitPrice));
+  }, [orderType, suggestedLimitPrice, market?.yes_bid_cents, market?.yes_ask_cents, market?.no_bid_cents, market?.no_ask_cents]);
+
+  const availableFunds = liveAvailableFunds(profile);
+  const preview = useMemo(
+    () =>
+      computeOrderPreview({
+        side,
+        action,
+        orderType,
+        qty: qtyNum,
+        limitPrice: limitNum,
+        market,
+      }),
+    [side, action, orderType, qtyNum, limitNum, market],
+  );
   const liveReady = tradingConfig?.live_trading_enabled && tradingConfig?.kalshi_configured;
   const totalReturn = profile ? experimentReturn(profile) : null;
+
+  function handleOrderTypeChange(next: OrderType) {
+    setOrderType(next);
+    if (next === "limit") {
+      applySuggestedLimitPrice();
+    }
+  }
+
+  function handleLimitOffsetChange(value: string) {
+    setLimitOffset(value);
+    limitPriceManual.current = false;
+    const offset = Number(value);
+    const next = computeDefaultLimitPrice(
+      side,
+      action,
+      market,
+      Number.isFinite(offset) ? offset : DEFAULT_LIMIT_OFFSET,
+    );
+    if (next != null) setLimitPrice(formatLimitPrice(next));
+  }
+
+  function toggleOrderPreview() {
+    setShowOrderPreview((current) => {
+      const next = !current;
+      try {
+        localStorage.setItem("polymarketer.showOrderPreview", next ? "1" : "0");
+      } catch {
+        /* ignore storage errors */
+      }
+      return next;
+    });
+  }
+
+  const actionToggleValue = action === "sell" && !canSell ? "buy" : action;
 
   async function handleModeSwitch(mode: "paper" | "live") {
     if (mode === preferredMode) return;
@@ -92,14 +261,20 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
 
   async function handleSubmit() {
     if (!ticker || Number(qty) <= 0) return;
+    if (action === "sell" && Number(qty) > heldQty) {
+      const msg = `You only hold ${heldQty} contract${heldQty === 1 ? "" : "s"} to sell.`;
+      setSubmitError(msg);
+      notifyWarning("Insufficient position", msg);
+      return;
+    }
     if (isLive && !confirmLive) {
       const msg = "Check “I confirm real money” before submitting a live order.";
       setSubmitError(msg);
       notifyWarning("Live confirmation required", msg);
       return;
     }
-    if (isLive && action === "buy") {
-      const estPrice = orderType === "limit" ? Number(limitPrice) : 0.5;
+    if (action === "buy") {
+      const estPrice = resolveOrderPrice(side, action, orderType, limitNum, market) ?? 0.5;
       const cost = estimateOrderCostUsd(Number(qty), estPrice, "buy");
       const afford = canAffordOrder(profile, cost);
       if (!afford.ok) {
@@ -335,7 +510,20 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
         ) : null}
 
         <div className="space-y-3 rounded-lg border border-ink-800 p-3">
-          <p className="text-xs font-medium text-ink-400">Order ticket</p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-medium text-ink-400">Order ticket</p>
+            <button
+              type="button"
+              title={showOrderPreview ? "Hide cost preview" : "Show cost preview"}
+              aria-pressed={showOrderPreview}
+              onClick={toggleOrderPreview}
+              className={`rounded px-1 py-0 text-[9px] font-semibold uppercase leading-none tracking-wide transition-colors ${
+                showOrderPreview ? "text-accent/80 hover:text-accent" : "text-ink-600 hover:text-ink-400"
+              }`}
+            >
+              $
+            </button>
+          </div>
           <p className="truncate font-mono text-xs text-ink-500">{ticker || "Expand a market chart"}</p>
 
           <ToggleRow
@@ -344,15 +532,16 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
               ["no", "NO"],
             ]}
             value={side}
-            onChange={(v) => setSide(v as TradeSide)}
+            onChange={(v) => handleSideChange(v as TradeSide)}
           />
           <ToggleRow
             options={[
               ["buy", "Buy"],
               ["sell", "Sell"],
             ]}
-            value={action}
-            onChange={(v) => setAction(v as TradeAction)}
+            value={actionToggleValue}
+            disabledIds={canSell ? [] : ["sell"]}
+            onChange={(v) => handleActionChange(v as TradeAction)}
           />
           <ToggleRow
             options={[
@@ -360,30 +549,85 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
               ["limit", "Limit"],
             ]}
             value={orderType}
-            onChange={(v) => setOrderType(v as OrderType)}
+            onChange={(v) => handleOrderTypeChange(v as OrderType)}
           />
 
           {orderType === "limit" ? (
-            <input
-              type="number"
-              step="0.01"
-              min="0.01"
-              max="0.99"
-              className="w-full rounded border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm"
-              value={limitPrice}
-              onChange={(e) => setLimitPrice(e.target.value)}
-              placeholder="Limit $"
-            />
+            <div className="space-y-2">
+              {referencePrice != null ? (
+                <p className="text-[10px] text-ink-600">
+                  Market {formatPreviewCents(referencePrice * 100)}
+                  {action === "buy" ? " · limit below" : " · limit above"}
+                </p>
+              ) : (
+                <p className="text-[10px] text-ink-600">Waiting for market quotes…</p>
+              )}
+              <label className="block text-[10px] text-ink-500">
+                Offset (0.05 = 5%)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="0.5"
+                  className="mt-0.5 w-full rounded border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm"
+                  value={limitOffset}
+                  onChange={(e) => handleLimitOffsetChange(e.target.value)}
+                />
+              </label>
+              <label className="block text-[10px] text-ink-500">
+                Limit $
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max="0.99"
+                  className="mt-0.5 w-full rounded border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm"
+                  value={limitPrice}
+                  onChange={(e) => {
+                    limitPriceManual.current = true;
+                    setLimitPrice(e.target.value);
+                  }}
+                  placeholder="Limit $"
+                />
+              </label>
+              <button
+                type="button"
+                className="text-[10px] text-accent hover:underline"
+                onClick={applySuggestedLimitPrice}
+                disabled={suggestedLimitPrice == null}
+              >
+                Reset to market ± offset
+              </button>
+            </div>
           ) : null}
 
           <input
             type="number"
             min="1"
+            max={action === "sell" && canSell ? heldQty : undefined}
             className="w-full rounded border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm"
             value={qty}
             onChange={(e) => setQty(e.target.value)}
             placeholder="Qty"
           />
+          {canSell ? (
+            <p className="text-[10px] text-ink-600">
+              {heldQty} contract{heldQty === 1 ? "" : "s"} available to sell
+            </p>
+          ) : null}
+
+          {showOrderPreview ? (
+            preview ? (
+              <OrderPreviewPanel
+                preview={preview}
+                action={action}
+                isLive={isLive}
+                availableFunds={availableFunds}
+              />
+            ) : qtyNum > 0 && ticker ? (
+              <p className="text-xs text-ink-600">Waiting for market quotes…</p>
+            ) : null
+          ) : null}
 
           {isLive ? (
             <label className="flex items-center gap-2 text-xs text-red-300">
@@ -396,7 +640,7 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
 
           <button
             type="button"
-            disabled={!ticker || submitting}
+            disabled={!ticker || submitting || (action === "sell" && !canSell)}
             onClick={() => void handleSubmit()}
             className="w-full rounded bg-accent px-3 py-2 text-sm font-medium text-ink-950 disabled:opacity-40"
           >
@@ -444,7 +688,7 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
                       <button
                         type="button"
                         className="min-w-0 flex-1 text-left"
-                        onClick={() => tradingStore.focusMarket(pos.ticker)}
+                        onClick={() => focusPosition(pos.ticker, pos.side, qty)}
                       >
                         <span className="font-semibold text-emerald-400">
                           LONG {pos.side.toUpperCase()}
@@ -540,9 +784,11 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
                       <button
                         type="button"
                         title={
-                          positionQty(order.ticker, order.side) > 0
-                            ? `Close ${order.action === "buy" ? "long" : "short"} with market ${order.action === "buy" ? "sell" : "buy"}`
-                            : "Cancel resting order"
+                          isRestingLimit(order)
+                            ? "Cancel resting limit order"
+                            : positionQty(order.ticker, order.side) > 0
+                              ? `Close ${order.action === "buy" ? "long" : "short"} with market ${order.action === "buy" ? "sell" : "buy"}`
+                              : "Cancel resting order"
                         }
                         disabled={cancellingId === order.id}
                         onClick={(e) => {
@@ -616,6 +862,66 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
         </div>
       </div>
     </aside>
+  );
+}
+
+function OrderPreviewPanel({
+  preview,
+  action,
+  isLive,
+  availableFunds,
+}: {
+  preview: NonNullable<ReturnType<typeof computeOrderPreview>>;
+  action: TradeAction;
+  isLive: boolean;
+  availableFunds: number;
+}) {
+  const costOrProceeds = action === "buy" ? preview.totalCostUsd : preview.proceedsUsd;
+  const insufficient = action === "buy" && costOrProceeds > availableFunds;
+
+  return (
+    <div className="space-y-2.5 rounded-lg border border-ink-700/80 bg-ink-900/70 px-3 py-3">
+      <p className="text-xs text-ink-400">
+        {isLive ? "Predictions account" : "Paper account"}
+        <span className="text-ink-600"> · </span>
+        <span className="font-medium text-ink-200">{formatUsd(availableFunds)} available</span>
+      </p>
+
+      <PreviewRow label="Average price" value={formatPreviewCents(preview.priceCents)} large />
+
+      <PreviewRow
+        label={action === "buy" ? "Cost" : "Proceeds"}
+        value={formatUsd(costOrProceeds)}
+        large
+      />
+
+      {preview.feeUsd > 0 ? (
+        <p className="text-[10px] text-ink-600">Includes {formatUsd(preview.feeUsd)} est. taker fee</p>
+      ) : null}
+
+      {action === "buy" ? (
+        <div>
+          <p className="text-xs text-ink-500">Max payout</p>
+          <p className="text-xs text-ink-500">{formatCloseDate(preview.closeDate)}</p>
+          <p className="font-mono text-lg font-medium text-ink-100">{formatUsd(preview.maxPayoutUsd)}</p>
+        </div>
+      ) : null}
+
+      {insufficient ? (
+        <p className="text-xs text-red-400">
+          Need {formatUsd(costOrProceeds)} — only {formatUsd(availableFunds)} available
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function PreviewRow({ label, value, large = false }: { label: string; value: string; large?: boolean }) {
+  return (
+    <div>
+      <p className="text-xs text-ink-500">{label}</p>
+      <p className={`font-mono ${large ? "text-lg font-medium text-ink-100" : "text-sm text-ink-200"}`}>{value}</p>
+    </div>
   );
 }
 
@@ -703,25 +1009,37 @@ function ToggleRow({
   options,
   value,
   onChange,
+  disabledIds = [],
 }: {
   options: [string, string][];
   value: string;
   onChange: (v: string) => void;
+  disabledIds?: string[];
 }) {
   return (
     <div className="flex gap-1">
-      {options.map(([id, label]) => (
-        <button
-          key={id}
-          type="button"
-          onClick={() => onChange(id)}
-          className={`flex-1 rounded px-2 py-1 text-xs font-medium ${
-            value === id ? "bg-accent/20 text-accent" : "bg-ink-900 text-ink-500"
-          }`}
-        >
-          {label}
-        </button>
-      ))}
+      {options.map(([id, label]) => {
+        const disabled = disabledIds.includes(id);
+        return (
+          <button
+            key={id}
+            type="button"
+            disabled={disabled}
+            onClick={() => {
+              if (!disabled) onChange(id);
+            }}
+            className={`flex-1 rounded px-2 py-1 text-xs font-medium ${
+              disabled
+                ? "cursor-not-allowed bg-ink-900/50 text-ink-700"
+                : value === id
+                  ? "bg-accent/20 text-accent"
+                  : "bg-ink-900 text-ink-500"
+            }`}
+          >
+            {label}
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -17,6 +17,8 @@ import {
   type Profile,
   type RoundTrip,
   type TradingConfig,
+  type TradeAction,
+  type TradeSide,
 } from "../api/trading";
 import {
   liveFundsBanner,
@@ -29,6 +31,12 @@ import { notifyError, notifySuccess, notificationStore } from "./notificationSto
 
 type Listener = () => void;
 
+export type TradeSetup = {
+  side: TradeSide;
+  action: TradeAction;
+  qty: string;
+};
+
 export type TradingSnapshot = {
   experiments: Experiment[];
   profile: Profile | null;
@@ -38,6 +46,7 @@ export type TradingSnapshot = {
   selectedTicker: string | null;
   focusTicker: string | null;
   focusSeq: number;
+  tradeSetupSeq: number;
   loading: boolean;
   error: string | null;
   tradingConfig: TradingConfig | null;
@@ -47,6 +56,7 @@ export type TradingSnapshot = {
 const STORAGE_KEY = "kalshi.activeExperimentId";
 const MODE_KEY = "kalshi.tradingMode";
 const EMPTY_TRIPS: RoundTrip[] = [];
+const EMPTY_ORDERS: Order[] = [];
 
 /** A truncated or error-shaped response must not put a non-array where the UI maps. */
 function asArray<T>(value: T[] | null | undefined): T[] {
@@ -123,11 +133,15 @@ class TradingStore {
   private profile: Profile | null = null;
   private fills: Fill[] = [];
   private openOrders: Order[] = [];
+  private openOrdersByTicker = new Map<string, Order[]>();
+  private openOrdersIndexSource: Order[] | null = null;
   private roundTripsByTicker = new Map<string, RoundTrip[]>();
   private activeExperimentId: string | null = null;
   private selectedTicker: string | null = null;
   private focusTicker: string | null = null;
   private focusSeq = 0;
+  private tradeSetup: TradeSetup | null = null;
+  private tradeSetupSeq = 0;
   private listeners = new Set<Listener>();
   private pollId: number | null = null;
   private visibilityBound = false;
@@ -163,6 +177,7 @@ class TradingStore {
       selectedTicker: this.selectedTicker,
       focusTicker: this.focusTicker,
       focusSeq: this.focusSeq,
+      tradeSetupSeq: this.tradeSetupSeq,
       loading: this.loading,
       error: this.error,
       tradingConfig: this.tradingConfig,
@@ -262,6 +277,26 @@ class TradingStore {
     return this.roundTripsByTicker.get(ticker) ?? EMPTY_TRIPS;
   }
 
+  private rebuildOpenOrdersByTicker() {
+    this.openOrdersByTicker.clear();
+    for (const o of this.openOrders) {
+      if (o.type !== "limit") continue;
+      if (o.status !== "open" && o.status !== "pending" && o.status !== "partial") continue;
+      const list = this.openOrdersByTicker.get(o.ticker);
+      if (list) list.push(o);
+      else this.openOrdersByTicker.set(o.ticker, [o]);
+    }
+    this.openOrdersIndexSource = this.openOrders;
+  }
+
+  /** Stable array ref for useSyncExternalStore — never return fresh []. */
+  getOpenOrdersForTicker(ticker: string): Order[] {
+    if (this.openOrdersIndexSource !== this.openOrders) {
+      this.rebuildOpenOrdersByTicker();
+    }
+    return this.openOrdersByTicker.get(ticker) ?? EMPTY_ORDERS;
+  }
+
   setSelectedTicker(ticker: string | null) {
     this.selectedTicker = ticker;
     this.emit();
@@ -278,6 +313,17 @@ class TradingStore {
     if (this.activeExperimentId) {
       void this.refreshRoundTrips(ticker);
     }
+  }
+
+  getTradeSetup(): TradeSetup | null {
+    return this.tradeSetup;
+  }
+
+  prepareTrade(ticker: string, side: TradeSide, action: TradeAction, qty: number) {
+    this.focusMarket(ticker);
+    this.tradeSetup = { side, action, qty: String(qty) };
+    this.tradeSetupSeq += 1;
+    this.emit();
   }
 
   async bootstrap() {
@@ -506,8 +552,14 @@ class TradingStore {
       throw new Error("No active experiment");
     }
     try {
-      await postOrder(this.activeExperimentId, payload, confirmLive);
+      const order = await postOrder(this.activeExperimentId, payload, confirmLive);
       await this.refresh();
+      if (order.reason === "settlement") {
+        notifySuccess(
+          "Position settled",
+          `${payload.ticker.slice(0, 20)}… closed at market expiration (${order.side.toUpperCase()} → ${Math.round(Number(order.limit_price) * 100)}¢).`,
+        );
+      }
     } catch (err) {
       this.notifyActionError(err);
     }
@@ -515,13 +567,20 @@ class TradingStore {
 
   async closeOpenOrder(order: Order, confirmLive = false) {
     if (!this.activeExperimentId) return;
+    const restingLimit = order.type === "limit" && Number(order.qty) - Number(order.filled_qty) > 0;
     try {
-      if (order.status === "open" || order.status === "pending") {
+      if (order.status === "open" || order.status === "pending" || order.status === "partial") {
         try {
           await cancelOrder(order.id, confirmLive);
         } catch {
           // order may already be gone on exchange
         }
+      }
+
+      if (restingLimit) {
+        notifySuccess("Order cancelled");
+        await this.refresh();
+        return;
       }
 
       const pos = this.profile?.positions.find(

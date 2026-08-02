@@ -1,10 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { createChart, type IChartApi, type ISeriesApi, type LineData, type SeriesMarker, type UTCTimestamp } from "lightweight-charts";
+import {
+  createChart,
+  LineStyle,
+  type IChartApi,
+  type IPriceLine,
+  type ISeriesApi,
+  type LineData,
+  type LogicalRange,
+  type SeriesMarker,
+  type UTCTimestamp,
+} from "lightweight-charts";
 import { fetchMarketHistory, type MarketHistory } from "../api";
 import { tradeLabel } from "../api/trading";
 import { chartCentsForSide, formatPnl, formatPnlPct } from "../lib/pnl";
 import { useMarketRow } from "../store/useMarketStore";
-import { useRoundTrips } from "../store/useTradingStore";
+import { useOpenOrders, useRoundTrips } from "../store/useTradingStore";
 import { seedTradesSinceOpen } from "../store/useTradeStore";
 import { KalshiLink } from "./KalshiLink";
 import { MarketFlowPanel } from "./MarketFlowPanel";
@@ -16,6 +26,8 @@ type Props = {
   openTime: string | null;
   closeTime: string | null;
   kalshiUrl: string;
+  chartHeight?: number;
+  className?: string;
 };
 
 type ChartTab = "price" | "flow" | "rules";
@@ -83,7 +95,15 @@ function ChartTabs({ tab, onChange }: { tab: ChartTab; onChange: (t: ChartTab) =
   );
 }
 
-export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: Props) {
+export function MarketChart({
+  ticker,
+  label,
+  openTime,
+  closeTime,
+  kalshiUrl,
+  chartHeight = CHART_H,
+  className = "",
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Line"> | null>(null);
@@ -98,8 +118,87 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
   const updatedAtRef = useRef<number>(0);
   const live = useMarketRow(ticker);
   const roundTrips = useRoundTrips(ticker);
+  const openOrders = useOpenOrders(ticker);
   const windowOpen = openTime ?? history?.open_time ?? null;
   const markersKeyRef = useRef<string>("");
+  const priceLineRefs = useRef<Map<string, IPriceLine>>(new Map());
+  const userViewLockedRef = useRef(false);
+  const fitOnceRef = useRef(false);
+  const visibleRangeRef = useRef<LogicalRange | null>(null);
+  const rangeHandlerRef = useRef<((range: LogicalRange | null) => void) | null>(null);
+  const wheelListenerRef = useRef<(() => void) | null>(null);
+  const wheelTargetRef = useRef<HTMLElement | null>(null);
+
+  function lockUserView() {
+    if (userViewLockedRef.current) return;
+    userViewLockedRef.current = true;
+    chartRef.current?.priceScale("right").applyOptions({ autoScale: false });
+  }
+
+  function restoreVisibleRange() {
+    const chart = chartRef.current;
+    const range = visibleRangeRef.current;
+    if (!chart || !userViewLockedRef.current || !range) return;
+    chart.timeScale().setVisibleLogicalRange(range);
+  }
+
+  function applyHistoryToSeries(data: LineData[]) {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series || data.length === 0) return;
+
+    const savedRange = userViewLockedRef.current ? chart.timeScale().getVisibleLogicalRange() : null;
+    const lastTime = lastPointTimeRef.current;
+    const latest = data[data.length - 1]?.time as number | undefined;
+
+    if (lastTime == null) {
+      series.setData(data);
+      if (!fitOnceRef.current) {
+        chart.timeScale().fitContent();
+        fitOnceRef.current = true;
+      }
+    } else {
+      try {
+        let cursor = lastTime;
+        for (const point of data) {
+          const time = point.time as number;
+          if (time < cursor) continue;
+          series.update(point);
+          cursor = time;
+        }
+      } catch {
+        series.setData(data);
+      }
+    }
+
+    lastPointTimeRef.current = latest ?? lastTime;
+
+    if (userViewLockedRef.current && savedRange) {
+      visibleRangeRef.current = savedRange;
+      restoreVisibleRange();
+    }
+  }
+
+  function teardownChart() {
+    const chart = chartRef.current;
+    if (chart && rangeHandlerRef.current) {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(rangeHandlerRef.current);
+    }
+    rangeHandlerRef.current = null;
+    if (wheelTargetRef.current && wheelListenerRef.current) {
+      wheelTargetRef.current.removeEventListener("wheel", wheelListenerRef.current);
+    }
+    wheelListenerRef.current = null;
+    wheelTargetRef.current = null;
+    chartRef.current?.remove();
+    chartRef.current = null;
+    seriesRef.current = null;
+    lastPointTimeRef.current = null;
+    userViewLockedRef.current = false;
+    fitOnceRef.current = false;
+    visibleRangeRef.current = null;
+    priceLineRefs.current.clear();
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -120,6 +219,9 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
     lastPointTsRef.current = null;
     closedRef.current = false;
     markersKeyRef.current = "";
+    userViewLockedRef.current = false;
+    fitOnceRef.current = false;
+    visibleRangeRef.current = null;
     setState("loading");
     setError(null);
     setHistory(null);
@@ -176,28 +278,29 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
       cancelled = true;
       window.clearTimeout(pollId);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      chartRef.current?.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
-      lastPointTimeRef.current = null;
-      lastPointTsRef.current = null;
+      teardownChart();
       closedRef.current = false;
     };
   }, [ticker]);
 
   useEffect(() => {
-    if (tab !== "price") return;
     if (!containerRef.current || state !== "ready" || !history) return;
 
     if (!chartRef.current) {
-      const chart = createChart(containerRef.current, {
-        width: containerRef.current.clientWidth,
-        height: CHART_H,
+      const container = containerRef.current;
+      const chart = createChart(container, {
+        width: container.clientWidth,
+        height: chartHeight,
         layout: { background: { color: "#0f172a" }, textColor: "#94a3b8" },
         grid: { vertLines: { color: "#1e293b" }, horzLines: { color: "#1e293b" } },
         rightPriceScale: { borderColor: "#334155" },
         timeScale: { borderColor: "#334155", timeVisible: true, secondsVisible: true },
         crosshair: { vertLine: { color: "#475569" }, horzLine: { color: "#475569" } },
+        handleScale: {
+          axisPressedMouseMove: { time: true, price: true },
+          mouseWheel: true,
+          pinch: true,
+        },
       });
       seriesRef.current = chart.addLineSeries({
         color: "#2dd4bf",
@@ -205,37 +308,24 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
         priceFormat: { type: "custom", formatter: (p: number) => `${p.toFixed(0)}¢` },
       });
       chartRef.current = chart;
-    }
 
-    const data = toSeriesData(history.points);
-    const series = seriesRef.current;
-    const chart = chartRef.current;
-    if (!series || !chart || data.length === 0) return;
+      const onRangeChange = (range: LogicalRange | null) => {
+        if (!range || !fitOnceRef.current) return;
+        lockUserView();
+        visibleRangeRef.current = range;
+      };
+      rangeHandlerRef.current = onRangeChange;
+      chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
 
-    const lastTime = lastPointTimeRef.current;
-    const latest = data[data.length - 1]?.time as number | undefined;
-
-    if (lastTime == null) {
-      series.setData(data);
-      chart.timeScale().fitContent();
+      const onWheel = () => lockUserView();
+      wheelListenerRef.current = onWheel;
+      wheelTargetRef.current = container;
+      container.addEventListener("wheel", onWheel, { passive: true });
     } else {
-      // See MarketFlowPanel: update() throws if it ever walks backwards, so fall back
-      // to a full rewrite rather than letting the chart take down the page.
-      try {
-        let cursor = lastTime;
-        for (const point of data) {
-          const time = point.time as number;
-          if (time < cursor) continue;
-          series.update(point);
-          cursor = time;
-        }
-      } catch {
-        series.setData(data);
-        chart.timeScale().fitContent();
-      }
+      chartRef.current.applyOptions({ height: chartHeight });
     }
 
-    lastPointTimeRef.current = latest ?? lastTime;
+    applyHistoryToSeries(toSeriesData(history.points));
 
     const onResize = () => {
       if (containerRef.current && chartRef.current) {
@@ -244,17 +334,7 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [history, state, tab]);
-
-  useEffect(() => {
-    if (tab !== "price") {
-      chartRef.current?.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
-      lastPointTimeRef.current = null;
-      return;
-    }
-  }, [tab]);
+  }, [history, state, chartHeight]);
 
   useEffect(() => {
     if (closedRef.current || state === "loading" || tab !== "price") return;
@@ -284,8 +364,16 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
     // Server history can carry a timestamp ahead of the browser clock; appending an
     // older point throws inside the chart and would blank the page.
     if (lastPointTimeRef.current != null && sec < lastPointTimeRef.current) return;
+
+    const savedRange = userViewLockedRef.current
+      ? chartRef.current?.timeScale().getVisibleLogicalRange()
+      : null;
     seriesRef.current.update(point);
     lastPointTimeRef.current = sec;
+    if (userViewLockedRef.current && savedRange && chartRef.current) {
+      visibleRangeRef.current = savedRange;
+      restoreVisibleRange();
+    }
     const now = Date.now();
     if (now - updatedAtRef.current >= 1000) {
       updatedAtRef.current = now;
@@ -297,6 +385,22 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
     if (tab !== "price" || state !== "ready" || !seriesRef.current) return;
     const windowStartMs = windowOpen ? Date.parse(windowOpen) : 0;
     const markers: SeriesMarker<UTCTimestamp>[] = [];
+
+    for (const order of openOrders) {
+      if (!order.limit_price || !order.created_at) continue;
+      const createdMs = Date.parse(order.created_at);
+      if (Number.isNaN(createdMs)) continue;
+      if (windowStartMs && createdMs < windowStartMs) continue;
+      const remaining = Number(order.qty) - Number(order.filled_qty);
+      const limitCents = Math.round(Number(order.limit_price) * 100);
+      markers.push({
+        time: Math.floor(createdMs / 1000) as UTCTimestamp,
+        position: order.action === "buy" ? "belowBar" : "aboveBar",
+        color: order.side === "yes" ? "#38bdf8" : "#fb923c",
+        shape: "circle",
+        text: `L ${limitCents}¢ · ${remaining}`,
+      });
+    }
 
     for (const rt of roundTrips) {
       if (windowStartMs && Date.parse(rt.entry_ts) < windowStartMs) continue;
@@ -334,16 +438,57 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
     }
 
     markers.sort((a, b) => (a.time as number) - (b.time as number));
-    const markersKey = markers.map((m) => `${m.time}:${m.text}`).join("|");
+    const markersKey = [
+      ...openOrders.map((o) => `${o.id}:${o.status}:${o.filled_qty}`),
+      ...markers.map((m) => `${m.time}:${m.text}`),
+    ].join("|");
     if (markersKey === markersKeyRef.current) return;
     markersKeyRef.current = markersKey;
     seriesRef.current.setMarkers(markers);
-  }, [roundTrips, tab, state, windowOpen]);
+  }, [openOrders, roundTrips, tab, state, windowOpen]);
+
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (tab !== "price" || state !== "ready" || !series) {
+      return;
+    }
+
+    const activeIds = new Set(openOrders.map((o) => o.id));
+    for (const [id, line] of priceLineRefs.current) {
+      if (!activeIds.has(id)) {
+        series.removePriceLine(line);
+        priceLineRefs.current.delete(id);
+      }
+    }
+
+    for (const order of openOrders) {
+      if (!order.limit_price) continue;
+      const y = chartCentsForSide(order.side, Number(order.limit_price));
+      const remaining = Number(order.qty) - Number(order.filled_qty);
+      const limitCents = Math.round(Number(order.limit_price) * 100);
+      const title = `${order.action === "buy" ? "B" : "S"}${order.side === "yes" ? "Y" : "N"} ${limitCents}¢·${remaining}`;
+      const color = order.action === "buy" ? "#38bdf8" : "#fb923c";
+      const existing = priceLineRefs.current.get(order.id);
+      if (existing) {
+        existing.applyOptions({ price: y, color, title });
+      } else {
+        const line = series.createPriceLine({
+          price: y,
+          color,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title,
+        });
+        priceLineRefs.current.set(order.id, line);
+      }
+    }
+  }, [openOrders, tab, state]);
 
   const windowLabel = formatWindow(history?.window_start ?? openTime, history?.window_end ?? closeTime);
 
   return (
-    <div className="border-t border-ink-800 bg-ink-950/80 px-4 py-4">
+    <div className={`border-t border-ink-800 bg-ink-950/80 px-4 py-4 ${className}`}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="text-sm font-medium text-ink-100">{label}</p>
@@ -364,33 +509,36 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
 
       <ChartTabs tab={tab} onChange={setTab} />
 
-      {tab === "price" ? (
-        <div className="relative h-[220px] overflow-hidden rounded-md border border-ink-800/80">
-          {state === "loading" ? (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-ink-500">
-              Loading chart…
-            </div>
-          ) : null}
-          {state === "error" ? (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-red-400">
-              {error}
-            </div>
-          ) : null}
-          {state === "empty" ? (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-ink-500">
-              No price data yet for the active bet window.
-            </div>
-          ) : null}
-          <div
-            ref={containerRef}
-            className={`h-full w-full ${state === "ready" ? "opacity-100" : "opacity-0"}`}
-          />
-        </div>
-      ) : tab === "flow" ? (
+      {tab === "flow" ? (
         <MarketFlowPanel ticker={ticker} active={tab === "flow"} />
-      ) : (
+      ) : tab === "rules" ? (
         <MarketRulesPanel ticker={ticker} active={tab === "rules"} />
-      )}
+      ) : null}
+
+      <div
+        className={`relative overflow-hidden rounded-md border border-ink-800/80 ${tab === "price" ? "" : "hidden"}`}
+        style={{ height: chartHeight }}
+      >
+        {state === "loading" ? (
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-ink-500">
+            Loading chart…
+          </div>
+        ) : null}
+        {state === "error" ? (
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-red-400">
+            {error}
+          </div>
+        ) : null}
+        {state === "empty" ? (
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-ink-500">
+            No price data yet for the active bet window.
+          </div>
+        ) : null}
+        <div
+          ref={containerRef}
+          className={`h-full w-full ${state === "ready" ? "opacity-100" : "opacity-0"}`}
+        />
+      </div>
     </div>
   );
 }

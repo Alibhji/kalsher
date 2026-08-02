@@ -329,7 +329,7 @@ export async function postOrder(
   experimentId: string,
   payload: OrderPayload,
   confirmLive = false,
-): Promise<unknown> {
+): Promise<Order> {
   return tradingFetch(`/experiments/${experimentId}/orders`, {
     method: "POST",
     headers: confirmLive ? { "X-Confirm-Live": "yes" } : {},

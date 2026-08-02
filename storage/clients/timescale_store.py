@@ -89,6 +89,27 @@ class TimescaleStore:
                 ask_cents,
             )
 
+    async def persist_market_result(self, ticker: str, status: str, result: str) -> None:
+        """Store the official market result so paper settlement can close positions."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE markets
+                SET status = $2,
+                    metadata = jsonb_set(
+                        COALESCE(metadata, '{}'::jsonb),
+                        '{market,result}',
+                        to_jsonb($3::text),
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE ticker = $1
+                """,
+                ticker,
+                status,
+                result,
+            )
+
     async def _liquidity_at_close(
         self,
         ticker: str,

@@ -5,10 +5,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from common.liquidity import market_has_liquidity
+from common.liquidity import market_has_liquidity, market_has_liquidity_dollars
+from common.prices import quote_cents_display, quote_row_from_yes_dollars
 from common.trade_flow import trade_signed_usd
 
-from ui.server.markets import _derived_no_cents, _is_live, _kalshi_url, _event_kalshi_url, _parse_decimal, _price_cents
+from ui.server.markets import _is_live, _kalshi_url, _event_kalshi_url, _parse_decimal
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -84,13 +85,8 @@ class MarketHub:
         row = dict(state.row)
         yes_bid = _parse_decimal(payload.get("yes_bid"))
         yes_ask = _parse_decimal(payload.get("yes_ask"))
-        if yes_bid is not None:
-            row["yes_bid_cents"] = _price_cents(yes_bid)
-        if yes_ask is not None:
-            row["yes_ask_cents"] = _price_cents(yes_ask)
-        no_bid, no_ask = _derived_no_cents(row.get("yes_bid_cents"), row.get("yes_ask_cents"))
-        row["no_bid_cents"] = no_bid
-        row["no_ask_cents"] = no_ask
+        quotes = quote_row_from_yes_dollars(yes_bid, yes_ask)
+        row.update(quotes)
         volume = _parse_decimal(payload.get("volume"))
         if volume is not None:
             row["volume"] = str(volume)
@@ -99,9 +95,9 @@ class MarketHub:
             row["open_interest"] = str(oi)
         row["has_quotes"] = row.get("yes_bid_cents") is not None or row.get("yes_ask_cents") is not None
         vol_num = float(volume) if volume is not None else (float(row["volume"]) if row.get("volume") else None)
-        row["has_liquidity"] = market_has_liquidity(
-            row.get("yes_bid_cents"),
-            row.get("yes_ask_cents"),
+        row["has_liquidity"] = market_has_liquidity_dollars(
+            yes_bid,
+            yes_ask,
             volume_usd=vol_num,
         )
         now = datetime.now(timezone.utc)
@@ -135,7 +131,7 @@ class MarketHub:
             "trade_id": str(trade_id) if trade_id is not None else None,
             "taker_side": payload.get("taker_side"),
             "signed_usd": round(signed, 2),
-            "price_cents": _price_cents(price),
+            "price_cents": quote_cents_display(price),
             "count": float(count) if count is not None else None,
             "ts": ts.isoformat(),
         }

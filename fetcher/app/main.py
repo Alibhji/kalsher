@@ -14,6 +14,8 @@ from common.kalshi.ws import WebSocketPool
 from common.logging import debug_data, get_logger, setup_logging
 from common.models import EventKind, NormalizedEvent
 from common.settings import FetcherSettings
+
+TERMINAL_STATUSES = frozenset({"finalized", "settled", "determined", "closed"})
 from fetcher.app.discovery import Discovery
 from fetcher.app.enrich import Enricher
 from fetcher.app.handlers.lifecycle import handle_lifecycle
@@ -157,6 +159,7 @@ class FetcherApp:
         try:
             snapshot = await self.redis_store.get_market_snapshot(ticker)
             await self.timescale_store.mark_market_closed(ticker, snapshot=snapshot)
+            await self._fetch_and_persist_result(ticker)
         except Exception as exc:
             log.warning("archive_market_failed", ticker=ticker, error=str(exc))
         finally:
@@ -164,6 +167,30 @@ class FetcherApp:
             await self.redis_store.purge_market(ticker)
             self.orderbook.forget(ticker)
             self._archiving.discard(ticker)
+
+    async def _fetch_and_persist_result(self, ticker: str, raw: dict[str, Any] | None = None) -> None:
+        """Persist official result and nudge the trader to settle immediately."""
+        result = str((raw or {}).get("result") or "").lower()
+        status = str((raw or {}).get("event_type") or "").lower()
+        if result not in ("yes", "no"):
+            try:
+                data = await self.rest.get_market(ticker)
+                market = data.get("market") if isinstance(data.get("market"), dict) else data
+                result = str(market.get("result") or "").lower()
+                status = str(market.get("status") or status or "determined").lower()
+            except Exception as exc:
+                log.debug("market_result_fetch_failed", ticker=ticker, error=str(exc))
+                return
+        if result not in ("yes", "no"):
+            return
+        if status not in TERMINAL_STATUSES:
+            status = "determined"
+        await self.timescale_store.persist_market_result(ticker, status, result)
+        await self.redis_store.publish_settle(ticker)
+
+    async def _finalize_market(self, ticker: str, raw: dict[str, Any]) -> None:
+        """Market result is official — persist it and settle any open paper/live positions."""
+        await self._fetch_and_persist_result(ticker, raw)
 
     async def _resync_orderbook(self, ticker: str) -> None:
         """Runs off the WS read loop so REST latency never stalls ingestion."""
@@ -211,8 +238,12 @@ class FetcherApp:
             ev = handle_lifecycle(data)
             if ev:
                 events.append(ev)
-                if ev.payload.get("event_type") in ("close", "settled", "determined"):
+                if ev.payload.get("event_type") == "close":
                     self._spawn(self._archive_and_purge_market(ev.ticker), name="archive")
+                elif ev.payload.get("event_type") in ("settled", "determined"):
+                    raw = ev.payload.get("raw")
+                    body = raw if isinstance(raw, dict) else {}
+                    self._spawn(self._finalize_market(ev.ticker, body), name="finalize")
                     series = self.discovery.series_for_ticker(ev.ticker)
                     if series:
                         self.discovery.request_scan(series)

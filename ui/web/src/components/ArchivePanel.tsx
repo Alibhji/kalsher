@@ -153,7 +153,7 @@ export function ArchivePanel() {
         <span>
           <span className="font-medium text-ink-100">Archive</span>
           <span className="ml-2 text-ink-500">
-            Liquid bets only — grouped by series, bet name, then time window
+            Liquid bets only — settled periods with official results
           </span>
         </span>
         <span className="text-ink-500">{open ? "▼" : "▶"}</span>

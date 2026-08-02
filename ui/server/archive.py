@@ -8,7 +8,30 @@ import asyncpg
 
 from common.liquidity import market_has_liquidity
 
-ARCHIVE_MARKETS_QUERY = r"""
+TERMINAL_ARCHIVE_STATUSES = ("finalized", "settled", "determined")
+
+# Official yes/no result stored by fetcher/trader settlement pipeline.
+_MARKET_RESULT_SQL = "COALESCE(m.metadata #>> '{market,result}', m.metadata #>> '{result}')"
+_SETTLED_MARKET_SQL = f"""
+    m.status IN ('finalized', 'settled', 'determined')
+    AND {_MARKET_RESULT_SQL} IN ('yes', 'no')
+"""
+# Period appears only when every liquid strike in the event is settled.
+_EVENT_LIQUID_SETTLED_SQL = """
+    AND NOT EXISTS (
+        SELECT 1 FROM markets m2
+        WHERE m2.event_ticker = m.event_ticker
+          AND m2.had_liquidity IS TRUE
+          AND (
+              m2.status NOT IN ('finalized', 'settled', 'determined')
+              OR COALESCE(m2.metadata #>> '{market,result}', m2.metadata #>> '{result}')
+                 NOT IN ('yes', 'no')
+          )
+    )
+"""
+
+ARCHIVE_MARKETS_QUERY = (
+    r"""
 SELECT
     m.ticker,
     m.event_ticker,
@@ -39,19 +62,18 @@ LEFT JOIN LATERAL (
     ORDER BY t.ts DESC
     LIMIT 1
 ) lt ON TRUE
-WHERE (
-    (m.close_time IS NOT NULL AND m.close_time < NOW())
-    OR (
-        m.status IN ('closed', 'finalized', 'settled', 'determined')
-        AND m.close_time IS NULL
-    )
-  )
+WHERE """
+    + _SETTLED_MARKET_SQL
+    + _EVENT_LIQUID_SETTLED_SQL
+    + r"""
   AND ($1::text IS NULL OR m.series_ticker = $1)
-ORDER BY m.close_time DESC
+ORDER BY m.close_time DESC NULLS LAST
 LIMIT $2
 """
+)
 
-ARCHIVE_EVENT_MARKETS_QUERY = r"""
+ARCHIVE_EVENT_MARKETS_QUERY = (
+    r"""
 SELECT
     m.ticker,
     m.event_ticker,
@@ -83,8 +105,12 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) lt ON TRUE
 WHERE m.event_ticker = $1
+  AND """
+    + _SETTLED_MARKET_SQL
+    + r"""
 ORDER BY floor_strike NULLS LAST, m.ticker
 """
+)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -154,7 +180,7 @@ def _market_payload(row: asyncpg.Record) -> dict[str, Any]:
 
 
 def build_archive_tree(rows: list[asyncpg.Record], *, period_limit: int) -> list[dict[str, Any]]:
-    """Group liquid archived markets: series → bet name → time period."""
+    """Group settled liquid markets: series → bet name → time period."""
     periods: dict[str, dict[str, Any]] = {}
 
     for row in rows:

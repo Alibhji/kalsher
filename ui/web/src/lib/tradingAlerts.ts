@@ -1,5 +1,6 @@
 import type { Profile } from "../api/trading";
 import { formatUsd } from "./format";
+import { kalshiTakerFee } from "./orderPreview";
 
 export const LIVE_LOW_FUNDS_USD = 5;
 export const LIVE_CRITICAL_FUNDS_USD = 1;
@@ -51,7 +52,7 @@ export function liveFundsBanner(profile: Profile | null): LiveFundsBanner | null
 
 export function estimateOrderCostUsd(qty: number, price: number, action: "buy" | "sell"): number {
   if (action === "sell") return 0;
-  return qty * price;
+  return qty * price + kalshiTakerFee(qty, price);
 }
 
 export function canAffordOrder(profile: Profile | null, costUsd: number): { ok: boolean; message?: string } {

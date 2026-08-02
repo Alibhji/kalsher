@@ -28,3 +28,8 @@ export function useRoundTrips(ticker: string) {
   const read = () => tradingStore.getRoundTrips(ticker);
   return useSyncExternalStore(subscribe, read, read);
 }
+
+export function useOpenOrders(ticker: string) {
+  const read = () => tradingStore.getOpenOrdersForTicker(ticker);
+  return useSyncExternalStore(subscribe, read, read);
+}

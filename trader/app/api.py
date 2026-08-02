@@ -27,6 +27,11 @@ from trader.app.book import get_quotes
 from trader.app.ledger import fee_for_fill
 from trader.app.live_account import fetch_kalshi_account
 from trader.app.pnl import build_profile, enrich_round_trip, parse_datetime_param, parse_equity_range
+from trader.app.settlement import (
+    fetch_kalshi_position_map,
+    settle_experiment_positions,
+    settle_position_at_market_result,
+)
 from trader.app.schemas import (
     CapitalAdjust,
     CloseAllRequest,
@@ -411,6 +416,22 @@ def create_router(app_state: Any) -> APIRouter:
         if new_qty > Decimal(str(app_state.settings.guards.max_position_per_market)):
             raise HTTPException(400, "would exceed max_position_per_market")
 
+        # Expired markets have no book liquidity; settle at the official result instead.
+        if body.action == "sell" and pos_qty > 0:
+            settled_id = await settle_position_at_market_result(
+                app_state.pool,
+                experiment_id=exp_id,
+                ticker=body.ticker,
+                side=body.side,
+                qty=min(body.qty, pos_qty),
+                client=app_state.kalshi_client(),
+                mode=exp["mode"],
+            )
+            if settled_id:
+                settled = await store().get_order(settled_id)
+                if settled:
+                    return _order_out(settled)
+
         order = await store().create_order(
             exp_id,
             body.ticker,
@@ -426,6 +447,21 @@ def create_router(app_state: Any) -> APIRouter:
 
         eng = engine_for(exp["mode"])
         result = await eng.submit_order(order, exp)
+        if result.get("status") == "rejected" and body.action == "sell" and pos_qty > 0:
+            # Book is often empty after archive; the result may have landed since we checked.
+            settled_id = await settle_position_at_market_result(
+                app_state.pool,
+                experiment_id=exp_id,
+                ticker=body.ticker,
+                side=body.side,
+                qty=min(body.qty, pos_qty),
+                client=app_state.kalshi_client(),
+                mode=exp["mode"],
+            )
+            if settled_id:
+                settled = await store().get_order(settled_id)
+                if settled:
+                    return _order_out(settled)
         if result.get("status") == "rejected":
             raise HTTPException(422, result.get("reason") or "order rejected")
         return _order_out(result)
@@ -462,6 +498,20 @@ def create_router(app_state: Any) -> APIRouter:
             qty = Decimal(str(p["qty"]))
             if qty <= 0:
                 continue
+            settled_id = await settle_position_at_market_result(
+                app_state.pool,
+                experiment_id=exp_id,
+                ticker=p["ticker"],
+                side=p["side"],
+                qty=qty,
+                client=app_state.kalshi_client(),
+                mode=exp["mode"],
+            )
+            if settled_id:
+                settled = await store().get_order(settled_id)
+                if settled:
+                    results.append(_order_out(settled))
+                    continue
             req = OrderRequest(
                 ticker=p["ticker"],
                 side=p["side"],
@@ -602,11 +652,23 @@ def create_router(app_state: Any) -> APIRouter:
         The trader reconciles live fills on its own background loop, so this stays a
         pure read — the UI no longer triggers an exchange call on every tick.
         """
-        await exp_svc().get(exp_id)
+        exp = await exp_svc().get(exp_id)
+        kalshi_map = None
+        client = app_state.kalshi_client()
+        if exp["mode"] == "live" and app_state.settings.trading_live_enabled and client:
+            try:
+                kalshi_map = await fetch_kalshi_position_map(client)
+            except Exception:
+                kalshi_map = None
+        await settle_experiment_positions(
+            app_state.pool,
+            store(),
+            exp_id,
+            mode=exp["mode"],
+            client=client,
+            kalshi_map=kalshi_map,
+        )
 
-        # Deliberately local-only: the exchange-backed source costs ~4s per call, which
-        # cannot sit on a 2s poll. Background reconciliation keeps the local ledger current,
-        # and /fills?source=kalshi remains available for analysis.
         profile = await build_profile(store(), app_state.redis, exp_id, **profile_kwargs())
         rows = await store().list_fills(exp_id, limit=200)
         fills = annotate_fills_pnl([normalize_local_fill(r) for r in rows])

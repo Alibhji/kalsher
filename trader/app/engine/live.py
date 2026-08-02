@@ -11,11 +11,10 @@ from common.kalshi.auth import KalshiAuth
 from common.kalshi.rest import KalshiRest
 from common.settings import TraderSettings
 from trader.app.kalshi_orders_v2 import build_kalshi_v2_order
-from trader.app.ledger import apply_fill_tx, apply_settlement_tx, fee_for_fill
+from trader.app.ledger import apply_fill_tx, fee_for_fill
 from trader.app.settlement import (
     fetch_kalshi_position_map,
-    resolve_market_result,
-    settlement_price,
+    settle_experiment_positions,
 )
 from trader.app.store import TradingStore
 
@@ -102,14 +101,17 @@ class LiveEngine:
             ) or current
         return current
 
-    async def cancel_order(self, order: dict[str, Any]) -> dict[str, Any]:
+    async def cancel_order(self, order: dict[str, Any], *, reason: str | None = None) -> dict[str, Any]:
         kid = order.get("kalshi_order_id")
         if kid:
             # Only mark it cancelled locally once the exchange confirms, otherwise we
             # would forget about an order that is still resting on the book.
             await self._client().cancel_order(str(kid))
             await self._sync_fills(order)
-        return await self.store.update_order(order["id"], status="cancelled") or order
+        fields: dict[str, Any] = {"status": "cancelled"}
+        if reason:
+            fields["reason"] = reason
+        return await self.store.update_order(order["id"], **fields) or order
 
     async def _sync_fills(self, order: dict[str, Any]) -> None:
         """Pull authoritative fills for one order. Safe to call repeatedly."""
@@ -171,37 +173,14 @@ class LiveEngine:
         client = self._client()
         if kalshi_map is None:
             kalshi_map = await fetch_kalshi_position_map(client)
-
-        positions = await self.store.list_positions(experiment_id)
-        settled = 0
-        for pos in positions:
-            qty = Decimal(str(pos["qty"]))
-            if qty <= 0:
-                continue
-            ticker = str(pos["ticker"])
-            side = str(pos["side"])
-            kalshi_qty = kalshi_map.get(ticker, {}).get(side, Decimal("0"))
-            # Only the contracts the exchange no longer holds are settled; settling the
-            # full local qty would close a position Kalshi still has open.
-            settle_qty = qty - kalshi_qty
-            if settle_qty <= 0:
-                continue
-
-            result, _status = await resolve_market_result(self.pool, client, ticker)
-            if not result:
-                continue
-
-            price = settlement_price(side, result)
-            await apply_settlement_tx(
-                self.pool,
-                experiment_id=experiment_id,
-                ticker=ticker,
-                side=side,
-                price=price,
-                qty=settle_qty,
-            )
-            settled += 1
-        return settled
+        return await settle_experiment_positions(
+            self.pool,
+            self.store,
+            experiment_id,
+            mode="live",
+            client=client,
+            kalshi_map=kalshi_map,
+        )
 
     async def reconcile_positions(self) -> None:
         if not self.settings.trading_live_enabled:

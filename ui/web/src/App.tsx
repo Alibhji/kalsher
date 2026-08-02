@@ -6,6 +6,7 @@ import { ResetPlatformButton } from "./components/ResetPlatformButton";
 import { ArchivePanel } from "./components/ArchivePanel";
 import { MarketFiltersBar } from "./components/MarketFilters";
 import { MarketsGrouped } from "./components/MarketsGrouped";
+import { OpenExposurePanel } from "./components/OpenExposurePanel";
 import { TradingSidebar } from "./components/TradingSidebar";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNav } from "./components/AppNav";
@@ -120,6 +121,7 @@ function MarketsDashboard() {
   return (
     <div className="flex min-h-screen">
       <NotificationCenter />
+      <OpenExposurePanel />
       <TradingSidebar mobileOpen={tradeDrawerOpen} onCloseMobile={() => setTradeDrawerOpen(false)} />
       <div className="mx-auto min-h-screen min-w-0 flex-1 max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       <div className="sticky top-0 z-50 -mx-4 mb-4 border-b border-ink-800/80 bg-[#0b1220]/95 px-4 py-2 backdrop-blur-sm sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
