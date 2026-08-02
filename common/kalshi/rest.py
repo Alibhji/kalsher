@@ -18,16 +18,17 @@ class TokenBucket:
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last
-            self._last = now
-            self._tokens = min(self.rate, self._tokens + elapsed * self.rate)
-            if self._tokens < 1:
-                await asyncio.sleep((1 - self._tokens) / self.rate)
-                self._tokens = 0
-            else:
-                self._tokens -= 1
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self.rate, self._tokens + (now - self._last) * self.rate)
+                self._last = now
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+                wait = (1 - self._tokens) / self.rate
+            # Sleep outside the lock so waiters share refills instead of serializing.
+            await asyncio.sleep(wait)
 
 
 class KalshiRest:

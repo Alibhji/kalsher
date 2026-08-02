@@ -12,6 +12,14 @@ export type TradePrint = {
 
 const RING_SIZE = 80;
 const MAX_WINDOW_TRADES = 20_000;
+const MAX_SEEN_IDS = 20_000;
+
+/**
+ * Shared instance for "no trades yet". A fresh `[]` here is not merely wasteful:
+ * these getters back useSyncExternalStore, and a new reference each read makes the
+ * snapshot look permanently changed, so React re-renders until it throws.
+ */
+const EMPTY_TRADES: readonly TradePrint[] = Object.freeze([]);
 
 type Listener = () => void;
 
@@ -53,11 +61,11 @@ class TradeStore {
   }
 
   getTape(ticker: string): readonly TradePrint[] {
-    return this.tapeByTicker.get(ticker) ?? [];
+    return this.tapeByTicker.get(ticker) ?? EMPTY_TRADES;
   }
 
   getWindowTrades(ticker: string): readonly TradePrint[] {
-    return this.windowTrades.get(ticker) ?? [];
+    return this.windowTrades.get(ticker) ?? EMPTY_TRADES;
   }
 
   getNetUsd(ticker: string): number {
@@ -91,7 +99,7 @@ class TradeStore {
         : `${trade.ticker}:${trade.ts}:${trade.signed_usd}`;
       if (batchSeen.has(key)) continue;
       batchSeen.add(key);
-      this.seenIds.add(key);
+      this._remember(key);
       window.push(trade);
       tape.push(trade);
       net += trade.signed_usd;
@@ -169,7 +177,7 @@ class TradeStore {
     return true;
   }
 
-  private _acceptTrade(trade: TradePrint, sinceMs: number | undefined): boolean {
+  private _acceptTrade(trade: TradePrint, sinceMs: number | null | undefined): boolean {
     const tradeMs = Date.parse(trade.ts);
     if (sinceMs != null && !Number.isNaN(tradeMs) && tradeMs < sinceMs) {
       return false;
@@ -182,11 +190,20 @@ class TradeStore {
       ? `${trade.ticker}:${trade.trade_id}`
       : `${trade.ticker}:${trade.ts}:${trade.signed_usd}`;
     if (this.seenIds.has(key)) return false;
-    this.seenIds.add(key);
-    if (this.seenIds.size > 20_000) {
-      this.seenIds.clear();
-    }
+    this._remember(key);
     return true;
+  }
+
+  /** Evict oldest ids rather than clearing, which would let replayed trades through. */
+  private _remember(key: string): void {
+    this.seenIds.add(key);
+    if (this.seenIds.size <= MAX_SEEN_IDS) return;
+    const evict = this.seenIds.size - MAX_SEEN_IDS + MAX_SEEN_IDS / 4;
+    let removed = 0;
+    for (const old of this.seenIds) {
+      this.seenIds.delete(old);
+      if (++removed >= evict) break;
+    }
   }
 
   private notifyTicker(ticker: string): void {

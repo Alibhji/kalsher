@@ -109,6 +109,3 @@ export function notifyWarning(title: string, message?: string, id?: string) {
   notificationStore.notify({ level: "warning", title, message, id });
 }
 
-export function notifyInfo(title: string, message?: string) {
-  notificationStore.notify({ level: "info", title, message });
-}

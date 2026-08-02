@@ -173,20 +173,8 @@ export async function fetchArchiveTree(series?: string, limit = 30): Promise<Arc
   if (!res.ok) {
     throw new Error(`Failed to load archive (${res.status})`);
   }
-  const payload = (await res.json()) as { series: ArchiveSeries[] };
-  return payload.series;
-}
-
-export async function fetchArchiveEvents(series?: string, limit = 30): Promise<ArchiveEvent[]> {
-  const params = new URLSearchParams();
-  if (series) params.set("series", series);
-  params.set("limit", String(limit));
-  const res = await fetch(`/api/archive/events?${params}`);
-  if (!res.ok) {
-    throw new Error(`Failed to load archive (${res.status})`);
-  }
-  const payload = (await res.json()) as { events: ArchiveEvent[] };
-  return payload.events;
+  const payload = (await res.json()) as { series?: ArchiveSeries[] };
+  return Array.isArray(payload.series) ? payload.series : [];
 }
 
 export async function fetchArchiveEventMarkets(eventTicker: string): Promise<ArchiveMarket[]> {
@@ -194,8 +182,8 @@ export async function fetchArchiveEventMarkets(eventTicker: string): Promise<Arc
   if (!res.ok) {
     throw new Error(`Failed to load archived event (${res.status})`);
   }
-  const payload = (await res.json()) as { markets: ArchiveMarket[] };
-  return payload.markets;
+  const payload = (await res.json()) as { markets?: ArchiveMarket[] };
+  return Array.isArray(payload.markets) ? payload.markets : [];
 }
 
 export type ResetPlatformResult = {

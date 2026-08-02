@@ -17,16 +17,6 @@ export function parseRoute(hash: string): AppRoute {
   return { page: "markets" };
 }
 
-export function navigateTo(route: AppRoute) {
-  if (route.page === "markets") {
-    window.location.hash = "/";
-  } else if (route.page === "history") {
-    window.location.hash = "/history";
-  } else {
-    window.location.hash = `/history/${route.experimentId}`;
-  }
-}
-
 export function useHashRoute(): AppRoute {
   const [route, setRoute] = useState<AppRoute>(() => parseRoute(window.location.hash));
 

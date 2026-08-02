@@ -172,9 +172,12 @@ class TimescaleStore:
 
     def _rows_for(self, ev: NormalizedEvent) -> list[tuple]:
         p = ev.payload
+        # Prefer the exchange timestamp so history reflects when the market moved,
+        # not when this process happened to consume the message.
+        ts = ev.source_ts or ev.ts
         if ev.kind == EventKind.TICK:
             return [(
-                ev.ts, ev.ticker,
+                ts, ev.ticker,
                 _dec(p.get("yes_bid")), _dec(p.get("yes_ask")),
                 _dec(p.get("no_bid")), _dec(p.get("no_ask")),
                 _dec(p.get("last_price")), _dec(p.get("volume")),
@@ -182,19 +185,19 @@ class TimescaleStore:
             )]
         if ev.kind == EventKind.TRADE:
             return [(
-                ev.ts, ev.ticker, _dec(p.get("price")), _dec(p.get("count")),
+                ts, ev.ticker, _dec(p.get("price")), _dec(p.get("count")),
                 p.get("taker_side"), p.get("trade_id"), json.dumps(p, default=str),
             )]
         if ev.kind == EventKind.BOOK_SNAPSHOT:
             side = p.get("side", "yes")
             return [
-                (ev.ts, ev.ticker, side, _dec(level.get("price")), _dec(level.get("size")), p.get("seq"), json.dumps(p, default=str))
+                (ts, ev.ticker, side, _dec(level.get("price")), _dec(level.get("size")), p.get("seq"), json.dumps(p, default=str))
                 for level in p.get("levels", [])
             ]
         if ev.kind == EventKind.BOOK_DELTA:
-            return [(ev.ts, ev.ticker, p.get("side"), _dec(p.get("price")), _dec(p.get("delta")), p.get("seq"), json.dumps(p, default=str))]
+            return [(ts, ev.ticker, p.get("side"), _dec(p.get("price")), _dec(p.get("delta")), p.get("seq"), json.dumps(p, default=str))]
         if ev.kind == EventKind.UNDERLYING:
-            return [(ev.ts, p.get("source", "unknown"), p.get("symbol", ev.ticker), _dec(p.get("price")), json.dumps(p, default=str))]
+            return [(ts, p.get("source", "unknown"), p.get("symbol", ev.ticker), _dec(p.get("price")), json.dumps(p, default=str))]
         if ev.kind == EventKind.LIFECYCLE:
-            return [(ev.ts, ev.ticker, p.get("event_type", "unknown"), json.dumps(p, default=str))]
+            return [(ts, ev.ticker, p.get("event_type", "unknown"), json.dumps(p, default=str))]
         return []

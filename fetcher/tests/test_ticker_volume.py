@@ -18,7 +18,9 @@ def test_ticker_ws_volume_fp_is_twice_dollar_volume() -> None:
     assert ev is not None
     assert str(ev.payload["volume"]) == "36947"
     assert str(ev.payload["volume_contracts_fp"]) == "73895.22"
-    assert Decimal(str(ev.payload["volume_contracts_fp"])) == Decimal(str(ev.payload["volume"])) * 2
+    # Kalshi truncates dollar_volume, so contracts_fp/2 only matches to within a dollar.
+    halved = Decimal(str(ev.payload["volume_contracts_fp"])) / 2
+    assert halved - Decimal(str(ev.payload["volume"])) < 1
 
 
 def test_ticker_uses_dollar_volume_to_match_kalshi_ui() -> None:

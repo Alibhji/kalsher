@@ -44,6 +44,10 @@ class MarketHub:
     def all_rows(self) -> list[dict[str, Any]]:
         return [state.row for state in self._markets.values()]
 
+    @property
+    def market_count(self) -> int:
+        return len(self._markets)
+
     def get_row(self, ticker: str) -> dict[str, Any] | None:
         state = self._markets.get(ticker)
         return state.row if state else None

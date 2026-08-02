@@ -244,6 +244,19 @@ export async function fetchProfile(experimentId: string): Promise<Profile> {
   return tradingFetch(`/experiments/${experimentId}/profile`);
 }
 
+export type TradingState = {
+  profile: Profile;
+  fills: Fill[];
+  open_orders: Order[];
+  round_trips: RoundTrip[];
+};
+
+/** Single round trip for the dashboard poll (profile + fills + orders + round trips). */
+export async function fetchTradingState(experimentId: string, ticker?: string): Promise<TradingState> {
+  const params = ticker ? `?ticker=${encodeURIComponent(ticker)}` : "";
+  return tradingFetch(`/experiments/${experimentId}/state${params}`);
+}
+
 export async function syncKalshiHistory(experimentId: string): Promise<{
   fill_count: number;
   first_ts: string | null;
@@ -325,14 +338,6 @@ export async function postOrder(
       qty: payload.qty,
       limit_price: payload.limit_price,
     }),
-  });
-}
-
-export async function closeAll(experimentId: string, ticker?: string, confirmLive = false): Promise<unknown> {
-  return tradingFetch(`/experiments/${experimentId}/close_all`, {
-    method: "POST",
-    headers: confirmLive ? { "X-Confirm-Live": "yes" } : {},
-    body: JSON.stringify({ ticker: ticker ?? null }),
   });
 }
 

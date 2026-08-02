@@ -7,7 +7,7 @@ from uuid import UUID
 import asyncpg
 import redis.asyncio as aioredis
 
-from trader.app.book import get_quotes, mid_price
+from trader.app.book import get_quotes_many, mid_price
 from trader.app.live_account import fetch_kalshi_account
 from trader.app.store import TradingStore
 
@@ -75,11 +75,12 @@ async def build_profile(
     unrealized_total = Decimal("0")
     position_value = Decimal("0")
 
+    quote_map = await get_quotes_many(redis, [p["ticker"] for p in positions])
+
     for p in positions:
         qty = Decimal(str(p["qty"]))
         avg = Decimal(str(p["avg_price"]))
-        quotes = await get_quotes(redis, p["ticker"])
-        mark = mid_price(quotes, p["side"])
+        mark = mid_price(quote_map.get(p["ticker"], {}), p["side"])
         basis = cost_basis(qty, avg)
         unreal = Decimal("0")
         if mark is not None:

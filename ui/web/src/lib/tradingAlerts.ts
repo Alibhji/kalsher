@@ -21,7 +21,9 @@ export function liveFundsStatus(profile: Profile | null): LiveFundsStatus {
   return "ok";
 }
 
-export function liveFundsBanner(profile: Profile | null): { title: string; message: string; level: LiveFundsStatus } | null {
+export type LiveFundsBanner = { title: string; message: string; level: Exclude<LiveFundsStatus, "ok"> };
+
+export function liveFundsBanner(profile: Profile | null): LiveFundsBanner | null {
   const status = liveFundsStatus(profile);
   const available = liveAvailableFunds(profile);
   if (status === "ok") return null;

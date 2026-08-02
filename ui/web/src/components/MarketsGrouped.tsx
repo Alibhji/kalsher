@@ -4,7 +4,7 @@ import { groupMarkets, type EventGroup, type SeriesGroup } from "../lib/groupMar
 import { marketHasLiquidity } from "../lib/filters";
 import { useMarketRow, useLiveGroupVolume } from "../store/useMarketStore";
 import { tradingStore } from "../store/tradingStore";
-import { useTradingStore } from "../store/useTradingStore";
+import { useTradingFocus } from "../store/useTradingStore";
 import {
   countdownTone,
   formatCents,
@@ -14,10 +14,10 @@ import {
 } from "../lib/format";
 import { KalshiLink } from "./KalshiLink";
 import { MarketChart } from "./MarketChart";
+import { useNowMs } from "../lib/useNow";
 
 type Props = {
   markets: MarketRow[];
-  nowMs: number;
   sortSubByVolume?: boolean;
   sortParentByVolume?: boolean;
   onToggleSortParentByVolume?: () => void;
@@ -68,7 +68,6 @@ function findMarketPath(groups: SeriesGroup[], ticker: string): { seriesTicker: 
 
 export function MarketsGrouped({
   markets,
-  nowMs,
   sortSubByVolume = true,
   sortParentByVolume = false,
   onToggleSortParentByVolume,
@@ -101,7 +100,7 @@ export function MarketsGrouped({
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(() => new Set());
   const [expandedChart, setExpandedChart] = useState<string | null>(null);
   const [groupsInitialized, setGroupsInitialized] = useState(false);
-  const { focusTicker, focusSeq } = useTradingStore();
+  const { focusTicker, focusSeq } = useTradingFocus();
   const lastHandledFocus = useRef(0);
 
   useEffect(() => {
@@ -274,7 +273,6 @@ export function MarketsGrouped({
               <SeriesSection
                 key={series.seriesTicker}
                 series={series}
-                nowMs={nowMs}
                 expanded={expandedSeries.has(series.seriesTicker)}
                 expandedEvents={expandedEvents}
                 expandedChart={expandedChart}
@@ -300,7 +298,6 @@ export function MarketsGrouped({
 
 type SeriesSectionProps = {
   series: SeriesGroup;
-  nowMs: number;
   expanded: boolean;
   expandedEvents: Set<string>;
   expandedChart: string | null;
@@ -311,7 +308,6 @@ type SeriesSectionProps = {
 
 function SeriesSection({
   series,
-  nowMs,
   expanded,
   expandedEvents,
   expandedChart,
@@ -348,9 +344,7 @@ function SeriesSection({
         ? series.events.map((event) => (
             <EventSection
               key={event.eventTicker}
-              seriesTicker={series.seriesTicker}
               event={event}
-              nowMs={nowMs}
               expanded={expandedEvents.has(collapseKey(series.seriesTicker, event.eventTicker))}
               expandedChart={expandedChart}
               onToggleEvent={() => onToggleEvent(event.eventTicker)}
@@ -363,9 +357,7 @@ function SeriesSection({
 }
 
 type EventSectionProps = {
-  seriesTicker: string;
   event: EventGroup;
-  nowMs: number;
   expanded: boolean;
   expandedChart: string | null;
   onToggleEvent: () => void;
@@ -373,15 +365,12 @@ type EventSectionProps = {
 };
 
 function EventSection({
-  seriesTicker,
   event,
-  nowMs,
   expanded,
   expandedChart,
   onToggleEvent,
   onToggleChart,
 }: EventSectionProps) {
-  const tone = countdownTone(event.secondsToClose, nowMs, event.closeTime);
   const illiquidCount = event.strikeCount - event.liquidCount;
   const noLiquidity = event.liquidCount === 0;
   const liveVolume = useLiveGroupVolume(event.tickers);
@@ -419,9 +408,11 @@ function EventSection({
         <td className="px-4 py-2.5 text-right font-mono text-sm text-ink-300">
           {volumeLabel(liveVolume)}
         </td>
-        <td className={`px-4 py-2.5 text-right font-mono text-sm ${toneClass(tone)}`}>
-          {formatCountdown(event.secondsToClose, nowMs, event.closeTime)}
-        </td>
+        <CountdownCell
+          seconds={event.secondsToClose}
+          closeTime={event.closeTime}
+          className="px-4 py-2.5 text-right font-mono text-sm"
+        />
         <td className="px-4 py-2.5">
           {event.eventKalshiUrl ? <KalshiLink url={event.eventKalshiUrl} /> : null}
         </td>
@@ -431,7 +422,6 @@ function EventSection({
             <MemoMarketRowView
               key={market.ticker}
               market={market}
-              nowMs={nowMs}
               stripe={i % 2 === 0}
               expandedChart={expandedChart === market.ticker}
               onToggleChart={() => onToggleChart(market.ticker)}
@@ -444,11 +434,28 @@ function EventSection({
 
 type MarketRowViewProps = {
   market: MarketRow;
-  nowMs: number;
   stripe: boolean;
   expandedChart: boolean;
   onToggleChart: () => void;
 };
+
+/** Owns the ticking clock so it re-renders alone, not the whole row. */
+function CountdownCell({
+  seconds,
+  closeTime,
+  className,
+}: {
+  seconds: number | null;
+  closeTime: string | null;
+  className: string;
+}) {
+  const nowMs = useNowMs();
+  return (
+    <td className={`${className} ${toneClass(countdownTone(seconds, nowMs, closeTime))}`}>
+      {formatCountdown(seconds, nowMs, closeTime)}
+    </td>
+  );
+}
 
 function LiveQuoteCells({ live }: { live: MarketRow }) {
   return (
@@ -464,10 +471,9 @@ function LiveQuoteCells({ live }: { live: MarketRow }) {
   );
 }
 
-function MarketRowView({ market, nowMs, stripe, expandedChart, onToggleChart }: MarketRowViewProps) {
+function MarketRowView({ market, stripe, expandedChart, onToggleChart }: MarketRowViewProps) {
   const live = useMarketRow(market.ticker) ?? market;
   const label = live.title || live.event_title || live.ticker;
-  const tone = countdownTone(live.seconds_to_close, nowMs, live.close_time);
   const liquid = marketHasLiquidity(live);
 
   return (
@@ -497,12 +503,14 @@ function MarketRowView({ market, nowMs, stripe, expandedChart, onToggleChart }: 
           ) : null}
         </td>
         <td className="px-4 py-2 font-mono text-xs text-ink-300">
-          {formatStrike(live.floor_strike, live.cap_strike, live.strike_type)}
+          {formatStrike(live.floor_strike, live.cap_strike)}
         </td>
         <LiveQuoteCells live={live} />
-        <td className={`px-4 py-2 text-right font-mono text-sm ${toneClass(tone)}`}>
-          {formatCountdown(live.seconds_to_close, nowMs, live.close_time)}
-        </td>
+        <CountdownCell
+          seconds={live.seconds_to_close}
+          closeTime={live.close_time}
+          className="px-4 py-2 text-right font-mono text-sm"
+        />
         <td className="px-4 py-2">
           <KalshiLink url={live.kalshi_url} />
         </td>

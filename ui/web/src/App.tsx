@@ -23,7 +23,6 @@ import { groupMarkets } from "./lib/groupMarkets";
 const GROUP_RECOMPUTE_MS = 500;
 const GROUP_SORT_MS = 10000;
 const FILTER_TICK_MS = 2000;
-const TICK_MS = 250;
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -47,15 +46,18 @@ function MarketsDashboard() {
   const [filters, setFilters] = useState<MarketFilters>(DEFAULT_FILTERS);
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState<string | null>(null);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [groupNowMs, setGroupNowMs] = useState(() => Date.now());
   const [sortTick, setSortTick] = useState(0);
   const [tradeDrawerOpen, setTradeDrawerOpen] = useState(false);
 
+  // sortTick only matters when the ordering itself depends on live volume.
+  const volumeSorted = filters.sortBy === "volume" || filters.sortParentByVolume;
+  const sortSeed = volumeSorted ? sortTick : 0;
   const structureMarkets = useMemo(
     () => applyMarketFilters(structuralMarkets, filters, groupNowMs, { keepNoLiquidity: true }),
-    [structuralMarkets, filters, groupNowMs, sortTick],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sortSeed forces a periodic re-sort
+    [structuralMarkets, filters, groupNowMs, sortSeed],
   );
 
   const visibleSubCount = useMemo(
@@ -67,7 +69,7 @@ function MarketsDashboard() {
     [structureMarkets, filters.sortSubByVolume, filters.hideNoLiquidity],
   );
 
-  const liveCount = useMemo(() => countLive(liveMarkets, nowMs), [liveMarkets, nowMs]);
+  const liveCount = useMemo(() => countLive(liveMarkets, groupNowMs), [liveMarkets, groupNowMs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,19 +107,15 @@ function MarketsDashboard() {
   }, []);
 
   useEffect(() => {
-    const tick = window.setInterval(() => setNowMs(Date.now()), TICK_MS);
-    return () => window.clearInterval(tick);
-  }, []);
-
-  useEffect(() => {
     const id = window.setInterval(() => setGroupNowMs(Date.now()), FILTER_TICK_MS);
     return () => window.clearInterval(id);
   }, []);
 
   useEffect(() => {
+    if (!volumeSorted) return;
     const id = window.setInterval(() => setSortTick((t) => t + 1), GROUP_SORT_MS);
     return () => window.clearInterval(id);
-  }, []);
+  }, [volumeSorted]);
 
   return (
     <div className="flex min-h-screen">
@@ -186,7 +184,6 @@ function MarketsDashboard() {
           <MarketsGrouped
             markets={structureMarkets}
             hideNoLiquidity={filters.hideNoLiquidity}
-            nowMs={nowMs}
             sortSubByVolume={filters.sortSubByVolume}
             sortParentByVolume={filters.sortParentByVolume}
             onToggleSortParentByVolume={() =>

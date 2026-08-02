@@ -307,11 +307,7 @@ export function ArchivePanel() {
                                                     {formatVolume(market.volume)}
                                                   </td>
                                                   <td className="px-4 py-2 text-right font-mono text-xs text-ink-400">
-                                                    {formatStrike(
-                                                      market.floor_strike,
-                                                      market.cap_strike,
-                                                      market.strike_type,
-                                                    )}
+                                                    {formatStrike(market.floor_strike, market.cap_strike)}
                                                   </td>
                                                   <td className="px-4 py-2 text-right font-mono text-xs text-ink-500">
                                                     {market.close_time

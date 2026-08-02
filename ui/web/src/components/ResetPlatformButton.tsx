@@ -46,7 +46,7 @@ export function ResetPlatformButton() {
     setBusy(true);
     setError(null);
     try {
-      const res = await resetPlatform(CONFIRM_PHRASE);
+      await resetPlatform(CONFIRM_PHRASE);
       setSummary("Reset complete — all data cleared. Reloading…");
       setStep("closed");
       setPhrase("");

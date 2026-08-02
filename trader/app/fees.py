@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import math
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 
 def kalshi_taker_fee(qty: Decimal, price: Decimal) -> Decimal:
-    """Kalshi fee: ceil(0.07 * qty * P * (1-P)) cents, returned in dollars."""
+    """Kalshi fee: 0.07 * qty * P * (1-P) dollars, rounded up to the next cent."""
     if qty <= 0 or price <= 0 or price >= 1:
         return Decimal("0")
-    raw_cents = Decimal("0.07") * qty * price * (Decimal("1") - price)
-    cents = Decimal(str(math.ceil(float(raw_cents * 100)))) / Decimal("100")
-    return cents
+    raw = Decimal("0.07") * qty * price * (Decimal("1") - price)
+    return raw.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
 
 
 def maker_fee(qty: Decimal, price: Decimal, maker_bps: int = 0) -> Decimal:

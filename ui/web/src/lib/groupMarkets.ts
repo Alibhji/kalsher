@@ -63,6 +63,10 @@ function liveVolume(m: MarketRow): number {
   return parseVolume(marketStore.getRow(m.ticker)?.volume ?? m.volume);
 }
 
+function byTicker(a: MarketRow, b: MarketRow): number {
+  return (a.ticker ?? "").localeCompare(b.ticker ?? "");
+}
+
 function sortMarkets(rows: MarketRow[], sortSubByVolume: boolean): MarketRow[] {
   const sorted = [...rows];
   if (sortSubByVolume) {
@@ -71,13 +75,13 @@ function sortMarkets(rows: MarketRow[], sortSubByVolume: boolean): MarketRow[] {
       if (volDiff !== 0) return volDiff;
       const strikeDiff = strikeSortKey(a) - strikeSortKey(b);
       if (strikeDiff !== 0) return strikeDiff;
-      return a.ticker.localeCompare(b.ticker);
+      return byTicker(a, b);
     });
   } else {
     sorted.sort((a, b) => {
       const strikeDiff = strikeSortKey(a) - strikeSortKey(b);
       if (strikeDiff !== 0) return strikeDiff;
-      return a.ticker.localeCompare(b.ticker);
+      return byTicker(a, b);
     });
   }
   return sorted;

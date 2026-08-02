@@ -219,10 +219,19 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
       series.setData(data);
       chart.timeScale().fitContent();
     } else {
-      for (const point of data) {
-        if ((point.time as number) >= lastTime) {
+      // See MarketFlowPanel: update() throws if it ever walks backwards, so fall back
+      // to a full rewrite rather than letting the chart take down the page.
+      try {
+        let cursor = lastTime;
+        for (const point of data) {
+          const time = point.time as number;
+          if (time < cursor) continue;
           series.update(point);
+          cursor = time;
         }
+      } catch {
+        series.setData(data);
+        chart.timeScale().fitContent();
       }
     }
 
@@ -272,6 +281,9 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
 
     if (state !== "ready" || !seriesRef.current) return;
 
+    // Server history can carry a timestamp ahead of the browser clock; appending an
+    // older point throws inside the chart and would blank the page.
+    if (lastPointTimeRef.current != null && sec < lastPointTimeRef.current) return;
     seriesRef.current.update(point);
     lastPointTimeRef.current = sec;
     const now = Date.now();

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from server.history import _resolve_close_time
+from ui.server.history import _resolve_close_time
 
 
 def test_resolve_close_time_prefers_actual_close() -> None:

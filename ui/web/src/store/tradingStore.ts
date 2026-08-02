@@ -2,9 +2,7 @@ import {
   cancelOrder,
   createExperiment,
   deleteExperiment,
-  fetchFills,
-  fetchOpenOrders,
-  fetchProfile,
+  fetchTradingState,
   fetchRoundTrips,
   fetchTradingConfig,
   listExperiments,
@@ -49,6 +47,11 @@ export type TradingSnapshot = {
 const STORAGE_KEY = "kalshi.activeExperimentId";
 const MODE_KEY = "kalshi.tradingMode";
 const EMPTY_TRIPS: RoundTrip[] = [];
+
+/** A truncated or error-shaped response must not put a non-array where the UI maps. */
+function asArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
 
 function tripsEqual(a: RoundTrip[], b: RoundTrip[]): boolean {
   if (a === b) return true;
@@ -127,6 +130,8 @@ class TradingStore {
   private focusSeq = 0;
   private listeners = new Set<Listener>();
   private pollId: number | null = null;
+  private visibilityBound = false;
+  private bootstrapInFlight: Promise<void> | null = null;
   private loading = false;
   private error: string | null = null;
   private tradingConfig: TradingConfig | null = null;
@@ -276,12 +281,21 @@ class TradingStore {
   }
 
   async bootstrap() {
+    // StrictMode double-mounts; without this guard both runs create a paper experiment.
+    if (this.bootstrapInFlight) return this.bootstrapInFlight;
+    this.bootstrapInFlight = this._bootstrap().finally(() => {
+      this.bootstrapInFlight = null;
+    });
+    return this.bootstrapInFlight;
+  }
+
+  private async _bootstrap() {
     this.loading = true;
     this.error = null;
     this.emit();
     try {
       this.tradingConfig = await fetchTradingConfig();
-      this.experiments = await listExperiments();
+      this.experiments = asArray(await listExperiments());
       const modeExp = this.findExperimentForMode(this.preferredMode);
       if (modeExp) {
         this.activeExperimentId = modeExp.id;
@@ -351,16 +365,39 @@ class TradingStore {
     }
   }
 
+  /** Fast while there is something in flight, slow when the session is idle. */
+  private pollDelayMs(): number {
+    if (document.hidden) return 30_000;
+    if (this.openOrders.length > 0) return 2000;
+    if (asArray(this.profile?.positions).some((p) => Number(p.qty) !== 0)) return 5000;
+    return 10_000;
+  }
+
   startPolling() {
     if (this.pollId != null) return;
-    this.pollId = window.setInterval(() => {
-      void this.refresh();
-    }, 2000);
+    // A throw here would drop the timer chain and freeze the panel until reload.
+    const tick = async () => {
+      this.pollId = null;
+      try {
+        if (!document.hidden) await this.refresh();
+      } catch (err) {
+        console.error("trading poll failed", err);
+      } finally {
+        this.pollId = window.setTimeout(tick, this.pollDelayMs());
+      }
+    };
+    this.pollId = window.setTimeout(tick, this.pollDelayMs());
+    if (!this.visibilityBound) {
+      this.visibilityBound = true;
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) void this.refresh();
+      });
+    }
   }
 
   stopPolling() {
     if (this.pollId != null) {
-      window.clearInterval(this.pollId);
+      window.clearTimeout(this.pollId);
       this.pollId = null;
     }
   }
@@ -425,16 +462,17 @@ class TradingStore {
       const active = this.experiments.find((e) => e.id === this.activeExperimentId);
       const isLive = active?.mode === "live";
       try {
-        if (isLive) {
-          this.profile = await syncLiveProfile(this.activeExperimentId!);
-        } else {
-          this.profile = await fetchProfile(this.activeExperimentId!);
-        }
+        const ticker = this.selectedTicker ?? undefined;
+        const state = await fetchTradingState(this.activeExperimentId!, ticker);
         const prevFills = this.fills;
-        this.fills = await fetchFills(this.activeExperimentId!);
-        this.openOrders = await fetchOpenOrders(this.activeExperimentId!);
-        if (this.selectedTicker) {
-          await this.refreshRoundTrips(this.selectedTicker, false);
+        this.profile = state.profile ?? null;
+        this.fills = asArray(state.fills);
+        this.openOrders = asArray(state.open_orders).filter(
+          (o) => o.status === "open" || o.status === "pending" || o.status === "partial",
+        );
+        const trips = asArray(state.round_trips);
+        if (ticker && !tripsEqual(this.roundTripsByTicker.get(ticker) ?? EMPTY_TRIPS, trips)) {
+          this.roundTripsByTicker.set(ticker, trips);
         }
         this.error = null;
         this.clearRefreshError();

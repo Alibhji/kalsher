@@ -55,12 +55,29 @@ class FetcherApp:
             self._route_ws_message,
             settings.ws_shards,
             on_reconnect=self._on_ws_reconnect,
+            queue_size=settings.ws_queue_size,
         )
         self.discovery = Discovery(self.rest, settings, on_change=self._on_universe_change)
         self._subscribed: dict[str, set[str]] = {str(i): set() for i in range(len(self.ws_pool.shards))}
         self._running = False
+        self._tasks: set[asyncio.Task] = set()
+        self._resyncing: set[str] = set()
+        self._archiving: set[str] = set()
+        self._runner: web.AppRunner | None = None
         self.messages_received = 0
         self.last_message_at: datetime | None = None
+
+    def _spawn(self, coro: Any, *, name: str) -> None:
+        """Fire-and-forget with the exception actually surfacing in the logs."""
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+        def _log_failure(t: asyncio.Task) -> None:
+            if not t.cancelled() and t.exception():
+                log.error("background_task_failed", task=name, error=str(t.exception()))
+
+        task.add_done_callback(_log_failure)
 
     async def _on_universe_change(
         self,
@@ -71,11 +88,11 @@ class FetcherApp:
     ) -> None:
         await self.redis_store.set_universe(universe)
         if added:
-            asyncio.create_task(self._enrich_and_publish(added_markets))
+            self._spawn(self._enrich_and_publish(added_markets), name="enrich")
             await self._subscribe_tickers(list(added), "add_markets")
         if removed:
             await self._subscribe_tickers(list(removed), "delete_markets")
-            asyncio.create_task(self._archive_and_purge_markets(removed))
+            self._spawn(self._archive_and_purge_markets(removed), name="archive")
 
     async def _enrich_and_publish(self, markets: list[dict[str, Any]]) -> None:
         events = await self.enricher.enrich_from_markets(markets)
@@ -91,8 +108,15 @@ class FetcherApp:
         if not tickers:
             return
         log.warning("ws_resubscribe", shard=shard_idx, tickers=len(tickers))
+        # Only forget the old subscription state once the resubscribe succeeds,
+        # otherwise a failure leaves us believing we are subscribed to nothing.
+        previous = set(self._subscribed[key])
         self._subscribed[key].clear()
-        await self._subscribe_tickers(tickers, "add_markets")
+        try:
+            await self._subscribe_tickers(tickers, "add_markets")
+        except Exception:
+            self._subscribed[key] = previous
+            raise
 
     async def _subscribe_tickers(self, tickers: list[str], action: str) -> None:
         if not tickers:
@@ -126,6 +150,10 @@ class FetcherApp:
                 self._subscribed[key] -= set(batch)
 
     async def _archive_and_purge_market(self, ticker: str) -> None:
+        # Lifecycle close and discovery removal can both fire for the same ticker.
+        if ticker in self._archiving:
+            return
+        self._archiving.add(ticker)
         try:
             snapshot = await self.redis_store.get_market_snapshot(ticker)
             await self.timescale_store.mark_market_closed(ticker, snapshot=snapshot)
@@ -134,6 +162,27 @@ class FetcherApp:
         finally:
             await self.redis_store.remove_from_universe(ticker)
             await self.redis_store.purge_market(ticker)
+            self.orderbook.forget(ticker)
+            self._archiving.discard(ticker)
+
+    async def _resync_orderbook(self, ticker: str) -> None:
+        """Runs off the WS read loop so REST latency never stalls ingestion."""
+        if ticker in self._resyncing:
+            return
+        self._resyncing.add(ticker)
+        try:
+            await self.redis_store.mark_book_stale(ticker)
+            events = await self.enricher.resync_orderbook(ticker)
+            if events:
+                if self.fanout:
+                    await self.fanout.publish(events)
+                await self.sink.enqueue(events)
+                await self.redis_store.clear_book_stale(ticker)
+        finally:
+            # Re-baseline either way; holding deltas back forever is worse than a
+            # brief inconsistency that the next WS snapshot repairs.
+            self.orderbook.forget(ticker)
+            self._resyncing.discard(ticker)
 
     async def _archive_and_purge_markets(self, tickers: set[str]) -> None:
         for ticker in tickers:
@@ -157,13 +206,13 @@ class FetcherApp:
             events.extend(self.orderbook.handle(data))
             for ev in events:
                 if ev.kind == EventKind.LIFECYCLE and ev.payload.get("event_type") == "book_seq_gap":
-                    await self.enricher.resync_orderbook(ev.ticker)
+                    self._spawn(self._resync_orderbook(ev.ticker), name="book_resync")
         elif msg_type in ("market_lifecycle_v2", "market_lifecycle"):
             ev = handle_lifecycle(data)
             if ev:
                 events.append(ev)
                 if ev.payload.get("event_type") in ("close", "settled", "determined"):
-                    asyncio.create_task(self._archive_and_purge_market(ev.ticker))
+                    self._spawn(self._archive_and_purge_market(ev.ticker), name="archive")
                     series = self.discovery.series_for_ticker(ev.ticker)
                     if series:
                         self.discovery.request_scan(series)
@@ -211,6 +260,15 @@ class FetcherApp:
         await self.ws_pool.stop()
         await self.rest.close()
         await self.sink.close()
+        if self._runner:
+            await self._runner.cleanup()
+
+    async def stop(self) -> None:
+        """Signal every loop to wind down so run()'s TaskGroup can exit."""
+        self._running = False
+        self.sink.stop()
+        await self.discovery.stop()
+        await self.ws_pool.stop()
 
     async def _metrics_server(self) -> None:
         app = web.Application()
@@ -231,7 +289,9 @@ class FetcherApp:
                     "sink_queue_depth": self.sink.queue_depth,
                     "sink_events_written": self.sink.events_written,
                     "sink_last_flush_ms": self.sink.last_flush_ms,
+                    "sink_dropped": self.sink.dropped,
                     "orderbook_seq_gaps": self.orderbook.seq_gaps,
+                    "orderbook_awaiting_resync": len(self.orderbook.awaiting_resync),
                     "fanout_published": self.fanout.published if self.fanout else None,
                     "fanout_drops": self.fanout.drops if self.fanout else None,
                     "last_message_lag_ms": lag_ms,
@@ -241,12 +301,13 @@ class FetcherApp:
         app.router.add_get("/healthz", healthz)
         app.router.add_get("/metrics", metrics)
         runner = web.AppRunner(app)
+        self._runner = runner
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", self.settings.metrics_port)
         await site.start()
         log.debug("metrics_started", port=self.settings.metrics_port)
         while self._running:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(1)
 
 
 def main() -> None:
@@ -258,9 +319,7 @@ def main() -> None:
     asyncio.set_event_loop(loop)
 
     def shutdown() -> None:
-        app._running = False
-        loop.create_task(app.discovery.stop())
-        loop.create_task(app.ws_pool.stop())
+        loop.create_task(app.stop())
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown)

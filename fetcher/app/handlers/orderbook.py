@@ -10,7 +10,13 @@ from common.models import EventKind, NormalizedEvent, parse_decimal, parse_ts
 class OrderbookState:
     def __init__(self) -> None:
         self.last_seq: dict[str, int] = {}
+        self.awaiting_resync: set[str] = set()
         self.seq_gaps = 0
+
+    def forget(self, ticker: str) -> None:
+        """Drop per-ticker state when a market leaves the universe."""
+        self.last_seq.pop(ticker, None)
+        self.awaiting_resync.discard(ticker)
 
     def handle(self, msg: dict[str, Any]) -> list[NormalizedEvent]:
         msg_type = msg.get("type")
@@ -29,6 +35,7 @@ class OrderbookState:
         seq = body.get("seq")
         if seq is not None:
             self.last_seq[ticker] = int(seq)
+        self.awaiting_resync.discard(ticker)
         now = datetime.now(timezone.utc)
         events: list[NormalizedEvent] = []
         for side in ("yes", "no"):
@@ -50,12 +57,20 @@ class OrderbookState:
         return events
 
     def _delta(self, ticker: str, body: dict[str, Any]) -> list[NormalizedEvent]:
+        # Deltas that arrive before the REST snapshot would corrupt the book again.
+        if ticker in self.awaiting_resync:
+            return []
+
         seq = body.get("seq")
         if seq is not None:
             seq = int(seq)
             prev = self.last_seq.get(ticker)
             if prev is not None and seq != prev + 1:
                 self.seq_gaps += 1
+                # Clear the baseline and hold off on deltas until a snapshot rebases
+                # us, otherwise every later delta looks like the same gap forever.
+                self.last_seq.pop(ticker, None)
+                self.awaiting_resync.add(ticker)
                 return [
                     NormalizedEvent(
                         kind=EventKind.LIFECYCLE,

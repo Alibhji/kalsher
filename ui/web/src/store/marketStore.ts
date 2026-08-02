@@ -4,12 +4,13 @@ import { tradeStore, type TradePrint } from "./tradeStore";
 type QuoteUpdate = Partial<MarketRow> & { ticker: string };
 
 type WsMessage =
-  | { t: "ready"; count: number; t_send?: number }
-  | { t: "q"; updates: QuoteUpdate[]; t_send?: number }
-  | { t: "add"; markets: MarketRow[]; t_send?: number }
-  | { t: "rm"; tickers: string[]; t_send?: number }
-  | { t: "archived"; tickers?: string[]; t_send?: number }
-  | { t: "tr"; trades: TradePrint[]; t_send?: number }
+  | { t: "ready"; count: number }
+  | { t: "resync" }
+  | { t: "q"; updates: QuoteUpdate[] }
+  | { t: "add"; markets: MarketRow[] }
+  | { t: "rm"; tickers: string[] }
+  | { t: "archived"; tickers?: string[] }
+  | { t: "tr"; trades: TradePrint[] }
   | { t: "pong"; client_t?: number };
 
 type Listener = () => void;
@@ -25,6 +26,8 @@ class MarketStore {
   private socket: WebSocket | null = null;
   private reconnectTimer = 0;
   private backoffMs = 500;
+  private shouldReconnect = true;
+  private resyncInFlight = false;
   /** Bumps only when the market list structure changes (seed / add / remove). */
   private listVersion = 0;
   private listSnapshot: MarketRow[] = [];
@@ -83,7 +86,8 @@ class MarketStore {
 
   seed(rows: MarketRow[]): void {
     this.markets.clear();
-    for (const row of rows) {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (!row?.ticker) continue;
       this.markets.set(row.ticker, row);
     }
     this.bumpListVersion();
@@ -120,6 +124,7 @@ class MarketStore {
     const url = `${proto}://${window.location.host}/ws`;
     const ws = new WebSocket(url);
     this.socket = ws;
+    this.shouldReconnect = true;
 
     ws.onopen = () => {
       this.connected = true;
@@ -140,11 +145,11 @@ class MarketStore {
       this.connected = false;
       this.socket = null;
       this.notifyConnection();
+      if (!this.shouldReconnect) return;
+      const delay = this.backoffMs + Math.random() * 250;
+      this.backoffMs = Math.min(this.backoffMs * 2, 10_000);
       window.clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = window.setTimeout(() => {
-        this.backoffMs = Math.min(this.backoffMs * 2, 10_000);
-        this.connect();
-      }, this.backoffMs);
+      this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
     };
 
     ws.onerror = () => {
@@ -153,6 +158,7 @@ class MarketStore {
   }
 
   disconnect(): void {
+    this.shouldReconnect = false;
     window.clearTimeout(this.reconnectTimer);
     this.socket?.close();
     this.socket = null;
@@ -183,18 +189,26 @@ class MarketStore {
       this.notifyArchive();
       return;
     }
+    if (msg.t === "resync") {
+      void this.resyncFromApi();
+      return;
+    }
     if (msg.t === "ready" && msg.count !== this.markets.size) {
       void this.resyncFromApi();
     }
   }
 
   private async resyncFromApi(): Promise<void> {
+    if (this.resyncInFlight) return;
+    this.resyncInFlight = true;
     try {
       const { fetchMarkets } = await import("../api");
       const payload = await fetchMarkets();
       this.seed(payload.markets);
     } catch {
-      // keep current snapshot; reconcile will retry on next ready/connect
+      // keep current snapshot; reconcile will retry on next ready/resync
+    } finally {
+      this.resyncInFlight = false;
     }
   }
 

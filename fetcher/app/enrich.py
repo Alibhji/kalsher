@@ -94,18 +94,6 @@ class Enricher:
 
         return normalized
 
-    async def enrich_tickers(self, tickers: set[str]) -> list[NormalizedEvent]:
-        """Legacy path: fetch each market individually (avoid on hot path)."""
-        markets: list[dict[str, Any]] = []
-        for ticker in tickers:
-            try:
-                data = await self.rest.get_market(ticker)
-                market = data.get("market", data)
-                markets.append(market)
-            except Exception as exc:
-                log.warning("enrich_market_fetch_failed", ticker=ticker, error=str(exc))
-        return await self.enrich_from_markets(markets)
-
     async def _event_cached(self, event_ticker: str) -> dict[str, Any] | None:
         import time
 
@@ -196,10 +184,31 @@ class Enricher:
         if flat:
             pipe.hset(f"kalshi:market:{ticker}", mapping=flat)
 
-    async def resync_orderbook(self, ticker: str) -> None:
+    async def resync_orderbook(self, ticker: str) -> list[NormalizedEvent]:
+        """Rebuild a gapped book from REST and return snapshot events for the sinks."""
         try:
             ob = await self.rest.get_orderbook(ticker)
-            await self.redis.mark_book_stale(ticker)
-            log.debug("orderbook_resync", ticker=ticker, keys=list(ob.keys()))
         except Exception as exc:
             log.warning("orderbook_resync_failed", ticker=ticker, error=str(exc))
+            return []
+
+        book = ob.get("orderbook") or ob
+        now = datetime.now(timezone.utc)
+        events: list[NormalizedEvent] = []
+        for side in ("yes", "no"):
+            raw_levels = book.get(side) or book.get(f"{side}_dollars") or []
+            levels = [
+                {"price": parse_decimal(item[0]), "size": parse_decimal(item[1])}
+                for item in raw_levels
+                if isinstance(item, (list, tuple)) and len(item) >= 2
+            ]
+            events.append(
+                NormalizedEvent(
+                    kind=EventKind.BOOK_SNAPSHOT,
+                    ticker=ticker,
+                    ts=now,
+                    payload={"side": side, "levels": levels, "seq": None, "resync": True},
+                )
+            )
+        log.debug("orderbook_resync", ticker=ticker, levels=sum(len(e.payload["levels"]) for e in events))
+        return events

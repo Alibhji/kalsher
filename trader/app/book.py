@@ -30,6 +30,25 @@ async def get_quotes(redis: aioredis.Redis, ticker: str) -> dict[str, Decimal | 
     }
 
 
+QUOTE_FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask", "last_price")
+
+
+async def get_quotes_many(
+    redis: aioredis.Redis, tickers: list[str]
+) -> dict[str, dict[str, Decimal | None]]:
+    """One round trip for many tickers instead of one HGETALL each."""
+    if not tickers:
+        return {}
+    pipe = redis.pipeline()
+    for ticker in tickers:
+        pipe.hmget(f"kalshi:market:{ticker}", *QUOTE_FIELDS)
+    rows = await pipe.execute()
+    return {
+        ticker: {field: _dec(value) for field, value in zip(QUOTE_FIELDS, values or [])}
+        for ticker, values in zip(tickers, rows)
+    }
+
+
 def mid_price(quotes: dict[str, Decimal | None], side: str) -> Decimal | None:
     if side == "yes":
         bid, ask = quotes.get("yes_bid"), quotes.get("yes_ask")
@@ -64,13 +83,6 @@ def yes_ask_from_no_book(no_bids: list[tuple[Decimal, Decimal]]) -> Decimal | No
         return None
     best_no_bid = no_bids[0][0]
     return Decimal("1") - best_no_bid
-
-
-def no_ask_from_yes_book(yes_bids: list[tuple[Decimal, Decimal]]) -> Decimal | None:
-    if not yes_bids:
-        return None
-    best_yes_bid = yes_bids[0][0]
-    return Decimal("1") - best_yes_bid
 
 
 async def get_ask_levels_for_buy(

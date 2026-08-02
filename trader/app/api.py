@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 
-from trader.app.capital import account_pnl, cumulative_capital, deposits_in_period, fetch_all_kalshi_deposits
+from trader.app.capital import cumulative_capital, deposits_in_period, fetch_all_kalshi_deposits
 from trader.app.experiments import ExperimentService
 from trader.app.fill_analysis import (
     build_account_pnl_series,
@@ -23,7 +23,9 @@ from trader.app.fill_analysis import (
     annotate_fills_pnl_with_settlements,
     summarize_period,
 )
-from trader.app.ledger import apply_fill_tx
+from trader.app.book import get_quotes
+from trader.app.ledger import fee_for_fill
+from trader.app.live_account import fetch_kalshi_account
 from trader.app.pnl import build_profile, enrich_round_trip, parse_datetime_param, parse_equity_range
 from trader.app.schemas import (
     CapitalAdjust,
@@ -356,6 +358,16 @@ def create_router(app_state: Any) -> APIRouter:
             return _exp_out(await exp_svc().delete_permanent(exp_id))
         return _exp_out(await exp_svc().archive(exp_id))
 
+    async def _assert_live_funds(body: OrderRequest) -> None:
+        """Reject a live buy we cannot pay for before it reaches the exchange."""
+        quotes = await get_quotes(app_state.redis, body.ticker)
+        ask = quotes.get("yes_ask") if body.side == "yes" else quotes.get("no_ask")
+        price = body.limit_price or ask or Decimal("1")
+        cost = body.qty * price + fee_for_fill(body.qty, price, "taker", app_state.settings.fees.maker_bps)
+        acct = await fetch_kalshi_account(app_state.settings, app_state.live_engine._client())
+        if cost > acct["available_funds"]:
+            raise HTTPException(400, f"insufficient funds: need {cost}, have {acct['available_funds']}")
+
     @router.post("/experiments/{exp_id}/orders", response_model=OrderOut)
     async def place_order(
         exp_id: UUID,
@@ -371,8 +383,13 @@ def create_router(app_state: Any) -> APIRouter:
             raise HTTPException(400, "qty exceeds max_order_qty")
 
         if body.client_order_id:
-            existing = await store().get_order_by_client_id(body.client_order_id)
+            existing = await store().get_order_by_client_id(body.client_order_id, exp_id)
             if existing:
+                # A retry of a still-working order should re-sync it rather than
+                # return a stale snapshot that never progresses past "pending".
+                if existing["status"] in ("open", "pending", "partial") and exp["mode"] == "live":
+                    await app_state.live_engine.sync_open_orders()
+                    existing = await store().get_order(existing["id"]) or existing
                 return _order_out(existing)
 
         if exp["mode"] == "live":
@@ -380,6 +397,8 @@ def create_router(app_state: Any) -> APIRouter:
                 raise HTTPException(403, "TRADING_LIVE_ENABLED is false")
             if x_confirm_live != "yes":
                 raise HTTPException(403, "X-Confirm-Live: yes header required")
+            if body.action == "buy":
+                await _assert_live_funds(body)
 
         pos = await store().get_position(exp_id, body.ticker, body.side)
         pos_qty = Decimal(str(pos["qty"])) if pos else Decimal("0")
@@ -428,6 +447,13 @@ def create_router(app_state: Any) -> APIRouter:
         x_confirm_live: str | None = Header(default=None),
     ):
         exp = await exp_svc().get(exp_id)
+        if exp["status"] != "active":
+            raise HTTPException(409, "experiment not active")
+        # Validate up front: failing partway through would leave some positions closed.
+        if exp["mode"] == "live" and (not app_state.settings.trading_live_enabled or x_confirm_live != "yes"):
+            raise HTTPException(403, "live close_all requires TRADING_LIVE_ENABLED and X-Confirm-Live")
+
+        eng = engine_for(exp["mode"])
         positions = await store().list_positions(exp_id)
         results = []
         for p in positions:
@@ -453,10 +479,6 @@ def create_router(app_state: Any) -> APIRouter:
                 exp["mode"],
                 client_order_id=str(uuid.uuid4()),
             )
-            eng = engine_for(exp["mode"])
-            if exp["mode"] == "live":
-                if not app_state.settings.trading_live_enabled or x_confirm_live != "yes":
-                    raise HTTPException(403, "live close_all requires TRADING_LIVE_ENABLED and X-Confirm-Live")
             results.append(_order_out(await eng.submit_order(order, exp)))
         return {"closed": results}
 
@@ -572,6 +594,36 @@ def create_router(app_state: Any) -> APIRouter:
         await app_state.live_engine.reconcile_experiment(exp_id)
         p = await build_profile(store(), app_state.redis, exp_id, **profile_kwargs())
         return ProfileOut(**p)
+
+    @router.get("/experiments/{exp_id}/state")
+    async def get_state(exp_id: UUID, ticker: str | None = None):
+        """Everything the dashboard polls for, in one round trip.
+
+        The trader reconciles live fills on its own background loop, so this stays a
+        pure read — the UI no longer triggers an exchange call on every tick.
+        """
+        await exp_svc().get(exp_id)
+
+        # Deliberately local-only: the exchange-backed source costs ~4s per call, which
+        # cannot sit on a 2s poll. Background reconciliation keeps the local ledger current,
+        # and /fills?source=kalshi remains available for analysis.
+        profile = await build_profile(store(), app_state.redis, exp_id, **profile_kwargs())
+        rows = await store().list_fills(exp_id, limit=200)
+        fills = annotate_fills_pnl([normalize_local_fill(r) for r in rows])
+        fills.sort(key=lambda f: f["ts"], reverse=True)
+        open_orders = await store().list_open_orders(exp_id)
+
+        round_trips: list[Any] = []
+        if ticker:
+            rows = await store().list_round_trips(exp_id, ticker=ticker)
+            round_trips = [enrich_round_trip(r) for r in rows]
+
+        return {
+            "profile": ProfileOut(**profile),
+            "fills": _fill_out_rows(fills[:200]),
+            "open_orders": [_order_out(o) for o in open_orders],
+            "round_trips": round_trips,
+        }
 
     @router.get("/experiments/{exp_id}/equity")
     async def get_equity(

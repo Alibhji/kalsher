@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Any
 
 from aiohttp import WSCloseCode, web
@@ -15,6 +14,11 @@ from ui.server.hub import MarketHub
 log = get_logger(__name__)
 
 QUEUE_MAX = 256
+RESYNC_FRAME = json.dumps({"t": "resync"})
+
+
+def _encode(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, default=str)
 
 
 class WsClient:
@@ -23,48 +27,47 @@ class WsClient:
         self.hub = hub
         self.settings = settings
         self.focus_ticker: str | None = None
-        self.queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=QUEUE_MAX)
+        self.queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=QUEUE_MAX)
         self.drops = 0
-        self.needs_resync = False
+        self.resyncs = 0
         self.closed = False
 
-    async def send_json(self, payload: dict[str, Any]) -> None:
+    def send(self, wire: str) -> None:
+        """Enqueue an already-serialized frame."""
         if self.closed:
             return
-        payload = dict(payload)
-        payload["t_send"] = time.time()
         try:
-            self.queue.put_nowait(payload)
+            self.queue.put_nowait(wire)
         except asyncio.QueueFull:
             self.drops += 1
+            self._request_resync()
+
+    def _request_resync(self) -> None:
+        """The client fell behind: discard the stale backlog and have it refetch."""
+        while True:
             try:
                 self.queue.get_nowait()
             except asyncio.QueueEmpty:
-                pass
-            try:
-                self.queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                self.needs_resync = True
+                break
+        self.resyncs += 1
+        self.queue.put_nowait(RESYNC_FRAME)
+
+    def send_ready(self) -> None:
+        self.send(_encode({"t": "ready", "count": self.hub.market_count}))
 
     async def writer_loop(self) -> None:
         while True:
-            msg = await self.queue.get()
-            if msg is None:
-                break
-            if self.needs_resync and msg.get("t") != "ready":
-                continue
-            if self.ws.closed:
+            wire = await self.queue.get()
+            if wire is None or self.ws.closed:
                 break
             try:
-                await self.ws.send_str(json.dumps(msg, default=str))
+                await self.ws.send_str(wire)
             except (ClientConnectionResetError, ConnectionResetError):
-                self.closed = True
                 break
-            if msg.get("t") == "ready":
-                self.needs_resync = False
-
-    async def send_ready(self) -> None:
-        await self.send_json({"t": "ready", "count": len(self.hub.all_rows())})
+            except Exception as exc:
+                log.warning("ws_send_failed", error=str(exc))
+                break
+        self.closed = True
 
 
 class WsManager:
@@ -72,16 +75,23 @@ class WsManager:
         self.hub = hub
         self.settings = settings
         self.clients: set[WsClient] = set()
+        self._trades: list[dict[str, Any]] = []
         self._running = False
 
     async def run(self) -> None:
         self._running = True
         while self._running:
             await asyncio.sleep(self.settings.list_flush_ms / 1000.0)
-            await self._flush_list()
+            try:
+                self._flush()
+            except Exception as exc:
+                log.warning("ws_flush_failed", error=str(exc))
 
     async def stop(self) -> None:
         self._running = False
+        for client in list(self.clients):
+            client.closed = True
+            client.queue.put_nowait(None)
 
     async def handle(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30.0)
@@ -89,12 +99,10 @@ class WsManager:
         client = WsClient(ws, self.hub, self.settings)
         self.clients.add(client)
         writer = asyncio.create_task(client.writer_loop())
-        await client.send_ready()
         try:
+            client.send_ready()
             async for msg in ws:
-                if msg.type == web.WSMsgType.ERROR:
-                    break
-                if msg.type == web.WSMsgType.CLOSE:
+                if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
                     break
                 if msg.type != web.WSMsgType.TEXT:
                     continue
@@ -106,7 +114,7 @@ class WsManager:
                 if op == "focus":
                     client.focus_ticker = data.get("ticker")
                 elif op == "ping":
-                    await client.send_json({"t": "pong", "client_t": data.get("t")})
+                    client.send(_encode({"t": "pong", "client_t": data.get("t")}))
         finally:
             client.closed = True
             self.clients.discard(client)
@@ -120,6 +128,13 @@ class WsManager:
 
         return ws
 
+    def broadcast(self, payload: dict[str, Any]) -> None:
+        if not self.clients:
+            return
+        wire = _encode(payload)
+        for client in list(self.clients):
+            client.send(wire)
+
     async def on_structure_change(
         self,
         *,
@@ -127,51 +142,68 @@ class WsManager:
         removed: list[str] | None = None,
         archived: list[str] | None = None,
     ) -> None:
-        added = added or []
-        removed = removed or []
-        archived = archived or []
-        for client in self.clients:
-            if removed:
-                await client.send_json({"t": "rm", "tickers": removed})
-            if added:
-                await client.send_json({"t": "add", "markets": added})
-            if archived:
-                await client.send_json({"t": "archived", "tickers": archived})
+        if removed:
+            self.broadcast({"t": "rm", "tickers": removed})
+        if added:
+            self.broadcast({"t": "add", "markets": added})
+        if archived:
+            self.broadcast({"t": "archived", "tickers": archived})
 
     async def on_trade(self, trade: dict[str, Any]) -> None:
-        if not trade:
-            return
-        for client in self.clients:
-            await client.send_json({"t": "tr", "trades": [trade]})
+        """Buffered; trades ship with the next list flush so bursts cost one frame."""
+        if trade:
+            self._trades.append(trade)
 
     async def on_tick(self, ticker: str) -> None:
+        """Low-latency path for the market a client has expanded."""
         if self.settings.market_flush_ms != 0:
+            return
+        watchers = [c for c in self.clients if c.focus_ticker == ticker]
+        if not watchers:
             return
         delta = self.hub.quote_delta(ticker)
         if not delta:
             return
-        for client in self.clients:
-            if client.focus_ticker == ticker:
-                await client.send_json({"t": "q", "updates": [delta]})
+        wire = _encode({"t": "q", "updates": [delta]})
+        for client in watchers:
+            client.send(wire)
 
-    async def _flush_list(self) -> None:
+    def _flush(self) -> None:
+        clients = list(self.clients)
+        self._flush_trades(clients)
+        self._flush_quotes(clients)
+
+    def _flush_trades(self, clients: list[WsClient]) -> None:
+        if not self._trades:
+            return
+        trades, self._trades = self._trades, []
+        if not clients:
+            return
+        wire = _encode({"t": "tr", "trades": trades})
+        for client in clients:
+            client.send(wire)
+
+    def _flush_quotes(self, clients: list[WsClient]) -> None:
         dirty = self.hub.dirty_tickers()
         if not dirty:
             return
-        updates = []
-        for ticker in dirty:
-            delta = self.hub.quote_delta(ticker)
-            if delta:
-                updates.append(delta)
+        updates = [d for d in (self.hub.quote_delta(t) for t in dirty) if d]
         self.hub.mark_clean(dirty)
-        if not updates:
+        if not updates or not clients:
             return
-        for client in self.clients:
-            list_updates = [
-                u for u in updates if client.focus_ticker is None or u["ticker"] != client.focus_ticker
-            ]
-            if list_updates:
-                await client.send_json({"t": "q", "updates": list_updates})
+
+        # Focused tickers already went out via on_tick, so skip them for those clients.
+        # Everyone else shares a single serialization.
+        skip_focus = self.settings.market_flush_ms == 0
+        wire_by_focus: dict[str | None, str | None] = {}
+        for client in clients:
+            focus = client.focus_ticker if skip_focus else None
+            if focus not in wire_by_focus:
+                subset = [u for u in updates if u["ticker"] != focus] if focus else updates
+                wire_by_focus[focus] = _encode({"t": "q", "updates": subset}) if subset else None
+            wire = wire_by_focus[focus]
+            if wire:
+                client.send(wire)
 
     @property
     def client_count(self) -> int:
@@ -180,3 +212,7 @@ class WsManager:
     @property
     def total_drops(self) -> int:
         return sum(c.drops for c in self.clients)
+
+    @property
+    def total_resyncs(self) -> int:
+        return sum(c.resyncs for c in self.clients)

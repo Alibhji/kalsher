@@ -74,81 +74,66 @@ class LiveEngine:
                 reason=str(exc)[:500],
             ) or order
 
+        # Kalshi sometimes wraps the created order in an envelope.
+        if not resp.get("order_id") and isinstance(resp.get("order"), dict):
+            resp = resp["order"]
         kalshi_id = resp.get("order_id")
         fill_count = Decimal(str(resp.get("fill_count") or "0"))
         remaining = Decimal(str(resp.get("remaining_count") or qty))
-        avg_price_raw = resp.get("average_fill_price")
 
-        if fill_count > 0:
-            price = Decimal(str(avg_price_raw)) if avg_price_raw else (limit_price or Decimal("0"))
-            if order["side"] == "no" and avg_price_raw:
-                price = Decimal("1") - price
-            fee = fee_for_fill(fill_count, price, "taker", self.settings.fees.maker_bps)
-            await apply_fill_tx(
-                self.pool,
-                order_id=order["id"],
-                experiment_id=order["experiment_id"],
-                ticker=order["ticker"],
-                side=order["side"],
-                action=order["action"],
-                price=price,
-                qty=fill_count,
-                fee=fee,
-            )
-            await self.store.update_order(
+        if not kalshi_id:
+            return await self.store.update_order(
                 order["id"],
-                kalshi_order_id=str(kalshi_id) if kalshi_id else None,
-                filled_qty=str(fill_count),
-                status="filled" if remaining <= 0 else "open",
-            )
-        elif remaining <= 0 and fill_count <= 0:
-            status = "rejected"
-            reason = "order canceled with no fill"
-            await self.store.update_order(
-                order["id"],
-                kalshi_order_id=str(kalshi_id) if kalshi_id else None,
-                status=status,
-                reason=reason,
-            )
-        else:
-            await self.store.update_order(
-                order["id"],
-                kalshi_order_id=str(kalshi_id) if kalshi_id else None,
-                status="open",
-            )
-            if fill_count <= 0:
-                updated = await self.store.get_order(order["id"]) or order
-                await self._sync_fills(updated)
+                status="rejected",
+                reason="exchange response had no order_id",
+            ) or order
 
-        return await self.store.get_order(order["id"]) or order
+        await self.store.update_order(order["id"], kalshi_order_id=str(kalshi_id), status="open")
+
+        # Fills always come from the fills endpoint so ids, prices and fees are the
+        # exchange's own. Anything not yet visible is picked up by sync_open_orders.
+        updated = await self.store.get_order(order["id"]) or order
+        await self._sync_fills(updated)
+
+        current = await self.store.get_order(order["id"]) or order
+        if current["status"] == "open" and remaining <= 0 and fill_count <= 0:
+            current = await self.store.update_order(
+                order["id"], status="rejected", reason="order canceled with no fill"
+            ) or current
+        return current
 
     async def cancel_order(self, order: dict[str, Any]) -> dict[str, Any]:
         kid = order.get("kalshi_order_id")
         if kid:
-            try:
-                await self._client().cancel_order(str(kid))
-            except Exception:
-                pass
+            # Only mark it cancelled locally once the exchange confirms, otherwise we
+            # would forget about an order that is still resting on the book.
+            await self._client().cancel_order(str(kid))
+            await self._sync_fills(order)
         return await self.store.update_order(order["id"], status="cancelled") or order
 
     async def _sync_fills(self, order: dict[str, Any]) -> None:
+        """Pull authoritative fills for one order. Safe to call repeatedly."""
         kid = order.get("kalshi_order_id")
         if not kid:
             return
-        try:
-            data = await self._client().get_fills(order_id=str(kid))
-        except Exception:
-            return
-        filled_so_far = Decimal(str(order.get("filled_qty") or 0))
+        data = await self._client().get_fills(order_id=str(kid))
         for fill in data.get("fills", []):
             qty = Decimal(str(fill.get("count_fp") or fill.get("count") or 0))
             if qty <= 0:
                 continue
+            external_id = str(fill.get("fill_id") or fill.get("trade_id") or "") or None
             price_raw = fill.get("yes_price_dollars") or fill.get("no_price_dollars") or fill.get("price")
             price = Decimal(str(price_raw)) if price_raw else Decimal("0")
             if order["side"] == "no" and fill.get("yes_price_dollars"):
                 price = Decimal("1") - price
-            fee = fee_for_fill(qty, price, "taker", self.settings.fees.maker_bps)
+            liquidity = "maker" if fill.get("is_taker") is False else "taker"
+            fee_raw = fill.get("fee_cost")
+            fee = (
+                Decimal(str(fee_raw))
+                if fee_raw is not None
+                else fee_for_fill(qty, price, liquidity, self.settings.fees.maker_bps)
+            )
+            # apply_fill_tx keeps orders.filled_qty/status in step and skips duplicates.
             await apply_fill_tx(
                 self.pool,
                 order_id=order["id"],
@@ -159,11 +144,21 @@ class LiveEngine:
                 price=price,
                 qty=qty,
                 fee=fee,
+                liquidity=liquidity,
+                external_id=external_id,
             )
-            filled_so_far += qty
-        if filled_so_far > Decimal(str(order.get("filled_qty") or 0)):
-            status = "filled" if filled_so_far >= Decimal(str(order["qty"])) else "open"
-            await self.store.update_order(order["id"], filled_qty=str(filled_so_far), status=status)
+
+    async def sync_open_orders(self) -> int:
+        """Reconcile every resting/partially filled live order with the exchange."""
+        if not self.settings.trading_live_enabled:
+            return 0
+        synced = 0
+        for order in await self.store.list_open_orders():
+            if order.get("mode") != "live" or not order.get("kalshi_order_id"):
+                continue
+            await self._sync_fills(order)
+            synced += 1
+        return synced
 
     async def reconcile_experiment(
         self,
@@ -186,7 +181,10 @@ class LiveEngine:
             ticker = str(pos["ticker"])
             side = str(pos["side"])
             kalshi_qty = kalshi_map.get(ticker, {}).get(side, Decimal("0"))
-            if kalshi_qty >= qty:
+            # Only the contracts the exchange no longer holds are settled; settling the
+            # full local qty would close a position Kalshi still has open.
+            settle_qty = qty - kalshi_qty
+            if settle_qty <= 0:
                 continue
 
             result, _status = await resolve_market_result(self.pool, client, ticker)
@@ -200,7 +198,7 @@ class LiveEngine:
                 ticker=ticker,
                 side=side,
                 price=price,
-                qty=qty,
+                qty=settle_qty,
             )
             settled += 1
         return settled
@@ -208,13 +206,9 @@ class LiveEngine:
     async def reconcile_positions(self) -> None:
         if not self.settings.trading_live_enabled:
             return
-        try:
-            client = self._client()
-            kalshi_map = await fetch_kalshi_position_map(client)
-            exps = await self.store.list_experiments()
-            for exp in exps:
-                if exp["mode"] != "live" or exp["status"] != "active":
-                    continue
-                await self.reconcile_experiment(exp["id"], kalshi_map)
-        except Exception:
-            pass
+        client = self._client()
+        kalshi_map = await fetch_kalshi_position_map(client)
+        for exp in await self.store.list_experiments():
+            if exp["mode"] != "live" or exp["status"] != "active":
+                continue
+            await self.reconcile_experiment(exp["id"], kalshi_map)

@@ -63,6 +63,10 @@ class LiveFeed:
     def set_on_structure_change(self, callback: StructureCallback | None) -> None:
         self._on_structure_change = callback
 
+    async def reseed(self) -> None:
+        """Rebuild hub state from Redis/DB (used after an admin reset)."""
+        await self._cold_start()
+
     async def _cold_start(self) -> None:
         payload = await fetch_markets(
             self._redis,
@@ -109,6 +113,7 @@ class LiveFeed:
                         web_base=self._settings.kalshi_web_base,
                         drop_no_liquidity=False,
                         live_only=False,
+                        only=sorted(missing),
                     )
                     by_ticker = {r["ticker"]: r for r in payload["markets"]}
                     for ticker in sorted(missing):
@@ -156,11 +161,11 @@ class LiveFeed:
 
         if kind == "tick":
             if self._hub.apply_tick(ticker, payload) and self._on_tick:
-                asyncio.create_task(self._on_tick(ticker))
+                await self._on_tick(ticker)
         elif kind == "trade":
             trade = self._hub.apply_trade(ticker, payload, frame_ts=frame.get("source_ts") or frame.get("ts"))
             if trade and self._on_trade:
-                asyncio.create_task(self._on_trade(trade))
+                await self._on_trade(trade)
         elif kind == "market_meta":
             was_new = self._hub.get_row(ticker) is None
             if self._hub.apply_market_meta(ticker, payload):
@@ -181,6 +186,8 @@ class LiveFeed:
                 src = source_ts if source_ts.tzinfo else source_ts.replace(tzinfo=timezone.utc)
             else:
                 src = datetime.fromisoformat(str(source_ts).replace("Z", "+00:00"))
+                if src.tzinfo is None:
+                    src = src.replace(tzinfo=timezone.utc)
             self.last_message_lag_ms = (datetime.now(timezone.utc) - src).total_seconds() * 1000
         else:
             t_pub = frame.get("t_pub")

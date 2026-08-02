@@ -49,14 +49,6 @@ export function useStructuralMarketRows(): MarketRow[] {
   return rows;
 }
 
-export function useMarketStoreRows(): MarketRow[] {
-  return useSyncExternalStore(
-    (listener) => marketStore.subscribeAll(listener),
-    () => marketStore.getSnapshot(),
-    () => marketStore.getSnapshot(),
-  );
-}
-
 /** Fresh rows for filters/sorting; quote fields update on interval, not every tick. */
 export function useThrottledMarketRows(intervalMs: number): MarketRow[] {
   const listVersion = useMarketListVersion();

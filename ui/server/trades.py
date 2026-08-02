@@ -23,16 +23,6 @@ ORDER BY ts DESC
 LIMIT $2
 """
 
-GROUP_TRADES_QUERY = """
-SELECT ts, ticker, price, count, taker_side, trade_id
-FROM trades
-WHERE ticker = ANY($1::text[])
-  AND ts >= $2
-ORDER BY ts ASC
-LIMIT $3
-"""
-
-
 def _iso(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -88,30 +78,6 @@ async def fetch_trades_for_ticker(
         else:
             rows = await conn.fetch(RECENT_TRADES_QUERY, ticker, min(limit, 200))
             rows = list(reversed(rows))
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        trade = _trade_payload(row)
-        if trade:
-            out.append(trade)
-    return out
-
-
-async def fetch_recent_trades(pool: asyncpg.Pool, ticker: str, *, limit: int = 50) -> list[dict[str, Any]]:
-    return await fetch_trades_for_ticker(pool, ticker, limit=limit)
-
-
-async def fetch_group_trades(
-    pool: asyncpg.Pool,
-    tickers: list[str],
-    *,
-    since: datetime,
-    limit: int = 20_000,
-) -> list[dict[str, Any]]:
-    if not tickers:
-        return []
-    limit = max(1, min(limit, 50_000))
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(GROUP_TRADES_QUERY, tickers, since, limit)
     out: list[dict[str, Any]] = []
     for row in rows:
         trade = _trade_payload(row)

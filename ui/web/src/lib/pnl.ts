@@ -10,20 +10,10 @@ export function formatPnlPct(pct: number): string {
   return "0.0%";
 }
 
-export function formatSignedUsd(value: number | null | undefined): string {
-  if (value == null) return "—";
-  return formatPnl(value);
-}
-
 export function pnlTone(value: number): "profit" | "loss" | "flat" {
   if (value > 0) return "profit";
   if (value < 0) return "loss";
   return "flat";
-}
-
-export function formatPnlWithPct(usd: number, pct: number | null | undefined): string {
-  if (pct == null) return formatPnl(usd);
-  return `${formatPnl(usd)} (${formatPnlPct(pct)})`;
 }
 
 export function pnlPctFromBasis(usd: number, basis: number): number | null {

@@ -123,6 +123,7 @@ class WebSocketPool:
         on_message: MessageHandler,
         shards: int,
         on_reconnect: Callable[[int], Awaitable[None]] | None = None,
+        queue_size: int = 10_000,
     ) -> None:
         count = max(1, shards)
 
@@ -140,6 +141,7 @@ class WebSocketPool:
                 auth,
                 on_message,
                 on_reconnect=make_reconnect(i) if on_reconnect else None,
+                queue_size=queue_size,
             )
             for i in range(count)
         ]

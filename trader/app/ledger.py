@@ -23,13 +23,19 @@ async def apply_fill(
     fee: Decimal,
     liquidity: str = "taker",
     exit_kind: str = "close",
-) -> UUID:
-    """Apply a fill inside an existing transaction. Returns fill id."""
+    external_id: str | None = None,
+) -> UUID | None:
+    """Apply a fill inside an existing transaction.
+
+    Returns the new fill id, or None when `external_id` was already recorded — the
+    exchange fill has been applied before and must not move cash or positions twice.
+    """
     fill_id = await conn.fetchval(
         """
         INSERT INTO trading.fills
-            (order_id, experiment_id, ticker, side, action, price, qty, fee, liquidity)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (order_id, experiment_id, ticker, side, action, price, qty, fee, liquidity, external_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING
         RETURNING id
         """,
         order_id,
@@ -41,7 +47,10 @@ async def apply_fill(
         qty,
         fee,
         liquidity,
+        external_id,
     )
+    if fill_id is None:
+        return None
 
     notional = qty * price
     exp = await conn.fetchrow("SELECT cash FROM trading.experiments WHERE id = $1 FOR UPDATE", experiment_id)
@@ -254,7 +263,8 @@ async def apply_fill_tx(
     qty: Decimal,
     fee: Decimal,
     liquidity: str = "taker",
-) -> UUID:
+    external_id: str | None = None,
+) -> UUID | None:
     async with pool.acquire() as conn:
         async with conn.transaction():
             return await apply_fill(
@@ -268,6 +278,7 @@ async def apply_fill_tx(
                 qty=qty,
                 fee=fee,
                 liquidity=liquidity,
+                external_id=external_id,
             )
 
 

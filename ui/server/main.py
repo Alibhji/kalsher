@@ -29,6 +29,17 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 
+def _int_param(request: web.Request, name: str, default: int, *, maximum: int) -> int:
+    raw = request.query.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise web.HTTPBadRequest(text=f"Invalid {name}")
+    return max(1, min(value, maximum))
+
+
 class UiApp:
     def __init__(self, settings: UiSettings) -> None:
         self.settings = settings
@@ -120,6 +131,7 @@ class UiApp:
                 "feed_last_message_lag_ms": feed.last_message_lag_ms if feed else None,
                 "ws_clients": ws.client_count if ws else 0,
                 "ws_drops": ws.total_drops if ws else 0,
+                "ws_resyncs": ws.total_resyncs if ws else 0,
             }
         )
 
@@ -166,7 +178,7 @@ class UiApp:
     async def _api_trades(self, request: web.Request) -> web.Response:
         assert self._pool is not None
         ticker = request.match_info["ticker"]
-        limit = int(request.query.get("limit", "5000"))
+        limit = _int_param(request, "limit", 5000, maximum=50_000)
         since_raw = request.query.get("since")
         since = parse_since_param(since_raw) if since_raw else None
         if since_raw and since is None:
@@ -185,14 +197,14 @@ class UiApp:
     async def _api_archive_tree(self, request: web.Request) -> web.Response:
         assert self._pool is not None
         series = request.query.get("series")
-        limit = int(request.query.get("limit", str(self.settings.archive_default_limit)))
+        limit = _int_param(request, "limit", self.settings.archive_default_limit, maximum=500)
         tree = await fetch_archive_tree(self._pool, series_ticker=series, period_limit=limit)
         return web.json_response({"series": tree})
 
     async def _api_archive_events(self, request: web.Request) -> web.Response:
         assert self._pool is not None
         series = request.query.get("series")
-        limit = int(request.query.get("limit", str(self.settings.archive_default_limit)))
+        limit = _int_param(request, "limit", self.settings.archive_default_limit, maximum=500)
         events = await fetch_archive_events(self._pool, series_ticker=series, limit=limit)
         return web.json_response({"events": events})
 
@@ -223,6 +235,13 @@ class UiApp:
                 {"ok": False, "error": "Failed to reset platform", "detail": str(exc)},
                 status=500,
             )
+        # The hub still holds the pre-reset universe; rebuild it and push clients a resync
+        # so the dashboard does not keep serving ghost markets until the next reconcile.
+        self._hub.seed_rows([])
+        if self._feed:
+            await self._feed.reseed()
+        if self._ws_manager:
+            self._ws_manager.broadcast({"t": "resync"})
         return web.json_response({"ok": True, **result})
 
     async def _index(self, _: web.Request) -> web.Response:

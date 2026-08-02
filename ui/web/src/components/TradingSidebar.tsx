@@ -59,7 +59,7 @@ export function TradingSidebar({ mobileOpen = true, onCloseMobile }: Props) {
   const visibleFills = closedOnly ? fills.filter((f) => f.trade_pnl != null) : fills.slice(0, 20);
 
   function positionQty(ticker: string, side: TradeSide): number {
-    const pos = profile?.positions.find((p) => p.ticker === ticker && p.side === side);
+    const pos = openPositions.find((p) => p.ticker === ticker && p.side === side);
     return pos ? Number(pos.qty) : 0;
   }
 

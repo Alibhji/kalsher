@@ -154,11 +154,20 @@ class TradingStore:
             )
         return dict(row) if row else None
 
-    async def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow(
-            "SELECT * FROM trading.orders WHERE client_order_id = $1",
-            client_order_id,
-        )
+    async def get_order_by_client_id(
+        self, client_order_id: str, experiment_id: UUID | None = None
+    ) -> dict[str, Any] | None:
+        if experiment_id is not None:
+            row = await self.pool.fetchrow(
+                "SELECT * FROM trading.orders WHERE experiment_id = $1 AND client_order_id = $2",
+                experiment_id,
+                client_order_id,
+            )
+        else:
+            row = await self.pool.fetchrow(
+                "SELECT * FROM trading.orders WHERE client_order_id = $1",
+                client_order_id,
+            )
         return dict(row) if row else None
 
     async def get_order(self, order_id: UUID) -> dict[str, Any] | None:
@@ -243,12 +252,12 @@ class TradingStore:
     async def list_open_orders(self, experiment_id: UUID | None = None) -> list[dict[str, Any]]:
         if experiment_id:
             rows = await self.pool.fetch(
-                "SELECT * FROM trading.orders WHERE experiment_id = $1 AND status IN ('open', 'pending') ORDER BY created_at",
+                "SELECT * FROM trading.orders WHERE experiment_id = $1 AND status IN ('open', 'pending', 'partial') ORDER BY created_at",
                 experiment_id,
             )
         else:
             rows = await self.pool.fetch(
-                "SELECT * FROM trading.orders WHERE status IN ('open', 'pending') ORDER BY created_at"
+                "SELECT * FROM trading.orders WHERE status IN ('open', 'pending', 'partial') ORDER BY created_at"
             )
         return [dict(r) for r in rows]
 

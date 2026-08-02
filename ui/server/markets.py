@@ -218,8 +218,9 @@ async def fetch_markets(
     web_base: str = "https://kalshi.com",
     drop_no_liquidity: bool = True,
     live_only: bool = True,
+    only: list[str] | None = None,
 ) -> dict[str, Any]:
-    tickers = sorted(await redis.smembers(UNIVERSE_KEY))
+    tickers = sorted(only) if only is not None else sorted(await redis.smembers(UNIVERSE_KEY))
     if not tickers:
         return {"markets": []}
 

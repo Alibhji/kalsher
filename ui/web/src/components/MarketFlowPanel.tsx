@@ -114,10 +114,20 @@ export function MarketFlowPanel({ ticker, active }: Props) {
     }
 
     if (tradeCount > tradeCountRef.current) {
-      for (const point of data) {
-        if ((point.time as number) >= lastPointTimeRef.current!) {
+      // update() validates against the series' own last point, which can drift from our
+      // ref (late trades, pruning, remounts). Rewriting the whole series is the safe
+      // recovery, since throwing here would tear down the page.
+      try {
+        let cursor = lastPointTimeRef.current!;
+        for (const point of data) {
+          const time = point.time as number;
+          if (time < cursor) continue;
           series.update(point);
+          cursor = time;
         }
+      } catch {
+        series.setData(data);
+        chart.timeScale().fitContent();
       }
       lastPointTimeRef.current = latestTime ?? lastPointTimeRef.current;
       tradeCountRef.current = tradeCount;

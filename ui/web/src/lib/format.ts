@@ -19,11 +19,7 @@ export function formatCents(bid: number | null, ask: number | null): string {
   return `${ask}¢`;
 }
 
-export function formatStrike(
-  floor: number | null,
-  cap: number | null,
-  strikeType: string | null,
-): string {
+export function formatStrike(floor: number | null, cap: number | null): string {
   if (floor == null && cap == null) return "—";
   if (floor != null && cap != null) return `${floor} – ${cap}`;
   if (floor != null) return String(floor);

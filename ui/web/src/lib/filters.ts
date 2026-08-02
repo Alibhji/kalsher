@@ -1,4 +1,5 @@
 import type { MarketRow } from "../api";
+import { parseVolume } from "./groupMarkets";
 
 export type SortKey = "close_time" | "volume" | "series";
 
@@ -42,11 +43,6 @@ export const DEFAULT_FILTERS: MarketFilters = {
   sortBy: "close_time",
 };
 
-function parseVolume(value: string | null): number {
-  if (!value) return 0;
-  const n = Number(value);
-  return Number.isNaN(n) ? 0 : n;
-}
 function haystack(m: MarketRow): string {
   return [
     m.ticker,

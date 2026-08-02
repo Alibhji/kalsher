@@ -10,6 +10,17 @@ import redis.asyncio as aioredis
 from common.models import EventKind, NormalizedEvent
 
 
+# Kalshi book deltas are incremental contract changes, so levels must be accumulated
+# rather than overwritten. Drop the level once it is fully consumed.
+_BOOK_DELTA_LUA = """
+local size = redis.call('ZINCRBY', KEYS[1], ARGV[2], ARGV[1])
+if tonumber(size) <= 0 then
+  redis.call('ZREM', KEYS[1], ARGV[1])
+end
+return 1
+"""
+
+
 def _json_default(obj: Any) -> Any:
     if isinstance(obj, Decimal):
         return str(obj)
@@ -51,9 +62,6 @@ class RedisStore:
             pipe.sadd(self.UNIVERSE_KEY, *sorted(tickers))
         await pipe.execute()
 
-    async def add_to_universe(self, ticker: str) -> None:
-        await self.client.sadd(self.UNIVERSE_KEY, ticker)
-
     async def remove_from_universe(self, ticker: str) -> None:
         await self.client.srem(self.UNIVERSE_KEY, ticker)
 
@@ -65,27 +73,15 @@ class RedisStore:
         pipe.delete(f"kalshi:book:{ticker}:no")
         await pipe.execute()
 
-    async def purge_markets(self, tickers: set[str] | list[str]) -> None:
-        if not tickers:
-            return
-        pipe = self.client.pipeline()
-        for ticker in tickers:
-            pipe.delete(f"kalshi:market:{ticker}")
-            pipe.delete(f"kalshi:book:{ticker}:yes")
-            pipe.delete(f"kalshi:book:{ticker}:no")
-        await pipe.execute()
-
     async def get_market_snapshot(self, ticker: str) -> dict[str, str]:
         raw = await self.client.hgetall(f"kalshi:market:{ticker}")
         return raw or {}
 
-    async def upsert_market_meta(self, ticker: str, fields: dict[str, Any]) -> None:
-        flat = {k: json.dumps(v, default=_json_default) if isinstance(v, (dict, list)) else str(v) for k, v in fields.items() if v is not None}
-        if flat:
-            await self.client.hset(f"kalshi:market:{ticker}", mapping=flat)
-
     async def mark_book_stale(self, ticker: str) -> None:
         await self.client.hset(f"kalshi:market:{ticker}", "book_stale", "1")
+
+    async def clear_book_stale(self, ticker: str) -> None:
+        await self.client.hdel(f"kalshi:market:{ticker}", "book_stale")
 
     async def write_events(self, events: list[NormalizedEvent]) -> None:
         if not events:
@@ -144,8 +140,6 @@ class RedisStore:
         else:
             price = p.get("price")
             delta = p.get("delta")
-            if price is not None:
-                if delta is None or delta == 0:
-                    pipe.zrem(key, str(price))
-                else:
-                    pipe.zadd(key, {str(price): float(delta)})
+            if price is None or delta is None or delta == 0:
+                return
+            pipe.eval(_BOOK_DELTA_LUA, 1, key, str(price), str(float(delta)))
