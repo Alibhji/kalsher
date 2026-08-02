@@ -33,6 +33,7 @@ from trader.app.settlement import (
     settle_position_at_market_result,
 )
 from trader.app.schemas import (
+    ArchiveEventPnlOut,
     CapitalAdjust,
     CloseAllRequest,
     ExperimentCreate,
@@ -291,7 +292,7 @@ def create_router(app_state: Any) -> APIRouter:
             fees=str(rt["fees"]),
             net_pnl=str(net),
             pnl_pct=str(pct.quantize(Decimal("0.01"))) if pct is not None else None,
-            exit_kind="close",
+            exit_kind=str(rt.get("exit_kind") or "close"),
             action_at_entry=f"buy {rt['side']}",
         )
 
@@ -348,6 +349,57 @@ def create_router(app_state: Any) -> APIRouter:
                 )
             )
         return out
+
+    @router.get(
+        "/experiments/{exp_id}/archive_pnl",
+        response_model=list[ArchiveEventPnlOut],
+    )
+    async def list_archive_pnl(exp_id: UUID):
+        exp = await exp_svc().get(exp_id)
+        use_kalshi = (
+            exp["mode"] == "live"
+            and bool(app_state.settings.kalshi_key_id)
+        )
+        if use_kalshi:
+            end_dt = datetime.now(timezone.utc)
+            fills, _ = await _analysis_fills(exp, start_dt=None, end_dt=end_dt, source="kalshi")
+            trips = await _round_trips_for_analysis(exp, fills, "kalshi", end_dt)
+            closed = [rt for rt in trips if rt.get("exit_ts") and rt.get("net_pnl") is not None]
+            tickers = list({str(rt["ticker"]) for rt in closed})
+            event_map = await store().event_ticker_map(tickers)
+            by_event: dict[str, dict[str, Any]] = {}
+            for rt in closed:
+                event = event_map.get(str(rt["ticker"]))
+                if not event:
+                    continue
+                bucket = by_event.setdefault(
+                    event, {"trade_count": 0, "net_pnl": Decimal("0")}
+                )
+                bucket["trade_count"] += 1
+                bucket["net_pnl"] += Decimal(str(rt["net_pnl"]))
+            return [
+                ArchiveEventPnlOut(
+                    event_ticker=event,
+                    trip_count=int(data["trade_count"]),
+                    trade_count=int(data["trade_count"]),
+                    net_pnl=str(data["net_pnl"].quantize(Decimal("0.0001"))),
+                )
+                for event, data in sorted(
+                    by_event.items(),
+                    key=lambda item: item[0],
+                )
+            ]
+
+        rows = await store().list_archive_pnl_for_experiment(exp_id)
+        return [
+            ArchiveEventPnlOut(
+                event_ticker=row["event_ticker"],
+                trip_count=int(row["trip_count"] or 0),
+                trade_count=int(row["trade_count"] or 0),
+                net_pnl=str(row["net_pnl"] if row["net_pnl"] is not None else "0"),
+            )
+            for row in rows
+        ]
 
     @router.get("/experiments/{exp_id}", response_model=ExperimentOut)
     async def get_experiment(exp_id: UUID):
@@ -590,6 +642,7 @@ def create_router(app_state: Any) -> APIRouter:
     async def list_round_trips(
         exp_id: UUID,
         ticker: str | None = None,
+        event_ticker: str | None = None,
         since: datetime | None = None,
         start: str | None = Query(default=None),
         end: str | None = Query(default=None),
@@ -603,10 +656,16 @@ def create_router(app_state: Any) -> APIRouter:
         if src == "auto":
             src = "kalshi" if exp["mode"] == "live" and app_state.settings.kalshi_key_id else "local"
 
+        event_ticker_set: set[str] | None = None
+        if event_ticker:
+            event_ticker_set = set(await store().list_tickers_for_event(event_ticker))
+
         if src in ("kalshi", "all") and exp["mode"] == "live" and app_state.settings.kalshi_key_id:
             fills, _ = await _analysis_fills(exp, start_dt=None, end_dt=end_dt, source=src)
             if ticker:
                 fills = [f for f in fills if f["ticker"] == ticker]
+            if event_ticker_set is not None:
+                fills = [f for f in fills if f["ticker"] in event_ticker_set]
             simulated = await _round_trips_for_analysis(exp, fills, src, end_dt)
             if start_dt or end_dt:
                 simulated = [
@@ -618,7 +677,9 @@ def create_router(app_state: Any) -> APIRouter:
                 ]
             return [_sim_round_trip_out(rt, i) for i, rt in enumerate(reversed(simulated))]
 
-        rows = await store().list_round_trips(exp_id, ticker, start_dt, end_dt)
+        rows = await store().list_round_trips(
+            exp_id, ticker, start_dt, end_dt, event_ticker=event_ticker
+        )
         out = []
         for r in rows:
             enriched = enrich_round_trip(dict(r))
@@ -669,8 +730,8 @@ def create_router(app_state: Any) -> APIRouter:
     async def get_state(exp_id: UUID, ticker: str | None = None):
         """Everything the dashboard polls for, in one round trip.
 
-        The trader reconciles live fills on its own background loop, so this stays a
-        pure read — the UI no longer triggers an exchange call on every tick.
+        Live mode uses Kalshi fills (short TTL cache) + FIFO/settlement P&L so
+        Recent fills match Trade History. Paper stays on the local ledger.
         """
         exp = await exp_svc().get(exp_id)
         kalshi_map = None
@@ -690,15 +751,27 @@ def create_router(app_state: Any) -> APIRouter:
         )
 
         profile = await build_profile(store(), app_state.redis, exp_id, **profile_kwargs())
-        rows = await store().list_fills(exp_id, limit=200)
-        fills = annotate_fills_pnl([normalize_local_fill(r) for r in rows])
-        fills.sort(key=lambda f: f["ts"], reverse=True)
         open_orders = await store().list_open_orders(exp_id)
+        end_dt = datetime.now(timezone.utc)
+        use_kalshi = exp["mode"] == "live" and bool(app_state.settings.kalshi_key_id)
 
-        round_trips: list[Any] = []
-        if ticker:
-            rows = await store().list_round_trips(exp_id, ticker=ticker)
-            round_trips = [enrich_round_trip(r) for r in rows]
+        if use_kalshi:
+            chrono, src = await _analysis_fills(exp, start_dt=None, end_dt=end_dt, source="kalshi")
+            fills = await _annotate_fills_for_analysis(exp, chrono, src, end_dt)
+            fills.sort(key=lambda f: f["ts"], reverse=True)
+            round_trips: list[Any] = []
+            if ticker:
+                sim = await _round_trips_for_analysis(exp, chrono, src, end_dt)
+                filtered = [rt for rt in sim if rt.get("ticker") == ticker]
+                round_trips = [_sim_round_trip_out(rt, i) for i, rt in enumerate(reversed(filtered))]
+        else:
+            rows = await store().list_fills(exp_id, limit=200)
+            fills = annotate_fills_pnl([normalize_local_fill(r) for r in rows])
+            fills.sort(key=lambda f: f["ts"], reverse=True)
+            round_trips = []
+            if ticker:
+                rows = await store().list_round_trips(exp_id, ticker=ticker)
+                round_trips = [enrich_round_trip(r) for r in rows]
 
         return {
             "profile": ProfileOut(**profile),

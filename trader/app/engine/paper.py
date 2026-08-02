@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import uuid
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
 
 import asyncpg
 import redis.asyncio as aioredis
@@ -50,11 +48,23 @@ class PaperEngine:
 
         if order_type == "limit":
             limit_price = Decimal(str(order["limit_price"]))
-            if await self._try_limit_fill(order, experiment, limit_price, remaining):
-                return await self.store.get_order(order["id"]) or order
-            return await self.store.update_order(order["id"], status="open") or order
+            await self._fill_marketable_limit(order, experiment, limit_price, remaining)
+            current = await self.store.get_order(order["id"]) or order
+            filled_now = Decimal(str(current.get("filled_qty") or 0))
+            if filled_now >= qty:
+                return current
+            return await self.store.update_order(order["id"], status="open") or current
 
-        fills = await self._walk_book(order, action, side, ticker, remaining)
+        # Market = Kalshi IOC: take only BBO, cancel any remainder.
+        fills = await self._walk_book(
+            order,
+            action,
+            side,
+            ticker,
+            remaining,
+            bbo_only=True,
+            liquidity="taker",
+        )
         if not fills:
             quotes = await get_quotes(self.redis, ticker)
             ref = mid_price(quotes, side)
@@ -64,7 +74,15 @@ class PaperEngine:
                 reason=f"no liquidity at {ref}",
             ) or order
 
-        return await self.store.get_order(order["id"]) or order
+        current = await self.store.get_order(order["id"]) or order
+        filled_now = Decimal(str(current.get("filled_qty") or 0))
+        if filled_now < qty:
+            return await self.store.update_order(
+                order["id"],
+                status="cancelled",
+                reason="ioc",
+            ) or current
+        return current
 
     async def _walk_book(
         self,
@@ -73,6 +91,11 @@ class PaperEngine:
         side: str,
         ticker: str,
         remaining: Decimal,
+        *,
+        bbo_only: bool = False,
+        limit_price: Decimal | None = None,
+        liquidity: str = "taker",
+        fill_price_override: Decimal | None = None,
     ) -> list[tuple[Decimal, Decimal]]:
         if action == "buy":
             levels = await get_ask_levels_for_buy(self.redis, ticker, side)
@@ -82,24 +105,30 @@ class PaperEngine:
         if not levels:
             return []
 
-        first_price = levels[0][0]
-        max_slip = Decimal(self.settings.fill.max_slippage_e4) / Decimal("10000")
+        if bbo_only:
+            levels = levels[:1]
+
         fills: list[tuple[Decimal, Decimal]] = []
 
         for price, avail in levels:
-            if action == "buy" and price > first_price + max_slip:
-                break
-            if action == "sell" and price < first_price - max_slip:
-                break
+            if limit_price is not None:
+                if action == "buy" and price > limit_price:
+                    break
+                if action == "sell" and price < limit_price:
+                    break
+
             take = min(remaining, avail)
             if take <= 0:
                 continue
-            fee = fee_for_fill(take, price, "taker", self.settings.fees.maker_bps)
+
+            exec_price = fill_price_override if fill_price_override is not None else price
+            fee = fee_for_fill(take, exec_price, liquidity, self.settings.fees.maker_bps)
+
             if action == "buy":
                 exp = await self.store.get_experiment(order["experiment_id"])
                 cash = Decimal(str(exp["cash"]))
-                if take * price + fee > cash:
-                    take = (cash - fee) / price if price > 0 else Decimal("0")
+                if take * exec_price + fee > cash:
+                    take = (cash - fee) / exec_price if exec_price > 0 else Decimal("0")
                     take = take.quantize(Decimal("0.01"))
                     if take <= 0:
                         break
@@ -117,16 +146,50 @@ class PaperEngine:
                 ticker=ticker,
                 side=side,
                 action=action,
-                price=price,
+                price=exec_price,
                 qty=take,
                 fee=fee,
+                liquidity=liquidity,
             )
-            fills.append((price, take))
+            fills.append((exec_price, take))
             remaining -= take
             if remaining <= 0:
                 break
 
         return fills
+
+    async def _fill_marketable_limit(
+        self,
+        order: dict[str, Any],
+        experiment: dict[str, Any],
+        limit_price: Decimal,
+        remaining: Decimal,
+    ) -> list[tuple[Decimal, Decimal]]:
+        """On submit: if limit crosses BBO, walk depth as taker up to limit."""
+        side = order["side"]
+        action = order["action"]
+        ticker = order["ticker"]
+
+        if action == "buy":
+            levels = await get_ask_levels_for_buy(self.redis, ticker, side)
+            best = levels[0][0] if levels else None
+            if best is None or best > limit_price:
+                return []
+        else:
+            levels = await get_bid_levels_for_sell(self.redis, ticker, side)
+            best = levels[0][0] if levels else None
+            if best is None or best < limit_price:
+                return []
+
+        return await self._walk_book(
+            order,
+            action,
+            side,
+            ticker,
+            remaining,
+            limit_price=limit_price,
+            liquidity="taker",
+        )
 
     async def _try_limit_fill(
         self,
@@ -135,44 +198,36 @@ class PaperEngine:
         limit_price: Decimal,
         remaining: Decimal,
     ) -> bool:
+        """Resting GTC poll: when crossed, fill at limit_price as maker."""
+        if remaining <= 0:
+            return False
+
         side = order["side"]
         action = order["action"]
         ticker = order["ticker"]
-        quotes = await get_quotes(self.redis, ticker)
 
         if action == "buy":
-            ask_side = "yes" if side == "yes" else "no"
-            if side == "yes":
-                no_bids = await get_ask_levels_for_buy(self.redis, ticker, "yes")
-                best_ask = no_bids[0][0] if no_bids else None
-            else:
-                levels = await get_ask_levels_for_buy(self.redis, ticker, "no")
-                best_ask = levels[0][0] if levels else None
-            if best_ask is None or best_ask > limit_price:
+            levels = await get_ask_levels_for_buy(self.redis, ticker, side)
+            best = levels[0][0] if levels else None
+            if best is None or best > limit_price:
                 return False
-            fill_price = min(best_ask, limit_price)
         else:
-            bid = mid_price(quotes, side)
             levels = await get_bid_levels_for_sell(self.redis, ticker, side)
-            best_bid = levels[0][0] if levels else None
-            if best_bid is None or best_bid < limit_price:
+            best = levels[0][0] if levels else None
+            if best is None or best < limit_price:
                 return False
-            fill_price = max(best_bid, limit_price)
 
-        fee = fee_for_fill(remaining, fill_price, "maker", self.settings.fees.maker_bps)
-        await apply_fill_tx(
-            self.pool,
-            order_id=order["id"],
-            experiment_id=order["experiment_id"],
-            ticker=ticker,
-            side=side,
-            action=action,
-            price=fill_price,
-            qty=remaining,
-            fee=fee,
+        fills = await self._walk_book(
+            order,
+            action,
+            side,
+            ticker,
+            remaining,
+            limit_price=limit_price,
             liquidity="maker",
+            fill_price_override=limit_price,
         )
-        return True
+        return bool(fills)
 
     async def cancel_order(self, order: dict[str, Any], *, reason: str | None = None) -> dict[str, Any]:
         fields: dict[str, Any] = {"status": "cancelled"}

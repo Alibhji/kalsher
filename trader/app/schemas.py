@@ -83,6 +83,13 @@ class ExperimentForEventOut(BaseModel):
     last_activity: str | None = None
 
 
+class ArchiveEventPnlOut(BaseModel):
+    event_ticker: str
+    trip_count: int
+    trade_count: int
+    net_pnl: str
+
+
 class PositionOut(BaseModel):
     ticker: str
     side: str

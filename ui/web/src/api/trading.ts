@@ -24,6 +24,13 @@ export type ExperimentForEvent = {
   last_activity: string | null;
 };
 
+export type ArchiveEventPnl = {
+  event_ticker: string;
+  trip_count: number;
+  trade_count: number;
+  net_pnl: string;
+};
+
 export type ExperimentStats = {
   experiment_id: string;
   name: string;
@@ -127,6 +134,7 @@ export type HistoryQuery = {
   start?: string;
   end?: string;
   source?: "auto" | "local" | "kalshi" | "all";
+  event_ticker?: string;
 };
 
 function historyQs(query?: HistoryQuery): string {
@@ -202,6 +210,10 @@ export async function listExperiments(includeArchived = false, tag?: string): Pr
 
 export async function fetchExperimentsForEvent(eventTicker: string): Promise<ExperimentForEvent[]> {
   return tradingFetch(`/experiments/by_event/${encodeURIComponent(eventTicker)}`);
+}
+
+export async function fetchArchivePnl(experimentId: string): Promise<ArchiveEventPnl[]> {
+  return tradingFetch(`/experiments/${experimentId}/archive_pnl`);
 }
 
 export async function fetchExperiment(experimentId: string): Promise<Experiment> {
@@ -315,6 +327,7 @@ export async function fetchRoundTrips(
 ): Promise<RoundTrip[]> {
   const params = new URLSearchParams();
   if (ticker) params.set("ticker", ticker);
+  if (query?.event_ticker) params.set("event_ticker", query.event_ticker);
   if (query?.start) params.set("start", query.start);
   if (query?.end) params.set("end", query.end);
   if (query?.source) params.set("source", query.source);

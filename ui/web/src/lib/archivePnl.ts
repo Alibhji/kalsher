@@ -1,9 +1,16 @@
 import type { PnlPoint, RoundTrip } from "../api/trading";
 
-/** Derive event ticker from a strike ticker (e.g. KXBTCD-26AUG0103-T100000). */
+/**
+ * Derive event ticker from a market/strike ticker.
+ * - Daily/hourly: KXBTCD-26AUG0211-T62999.99 → KXBTCD-26AUG0211
+ * - 15M / short suffix: KXBTC15M-26AUG021145-45 → KXBTC15M-26AUG021145
+ */
 export function eventTickerFromMarketTicker(ticker: string): string {
-  const idx = ticker.lastIndexOf("-T");
-  return idx > 0 ? ticker.slice(0, idx) : ticker;
+  const tStrike = ticker.match(/^(.*)-T-?\d+(?:\.\d+)?$/i);
+  if (tStrike) return tStrike[1];
+  const numericSuffix = ticker.match(/^(.*)-(\d{1,4})$/);
+  if (numericSuffix) return numericSuffix[1];
+  return ticker;
 }
 
 export function filterTripsForEvent(
@@ -13,8 +20,21 @@ export function filterTripsForEvent(
 ): RoundTrip[] {
   const tickers = marketTickers ? new Set(marketTickers) : null;
   return trips.filter((rt) => {
-    if (tickers) return tickers.has(rt.ticker);
+    // Prefer exact market membership when available; still keep same-event orphans.
+    if (tickers?.has(rt.ticker)) return true;
     return eventTickerFromMarketTicker(rt.ticker) === eventTicker;
+  });
+}
+
+/** Sort trips oldest→newest for summary "trade in / trade out" rows. */
+export function sortTripsChronologically(trips: RoundTrip[]): RoundTrip[] {
+  return [...trips].sort((a, b) => {
+    const ae = Date.parse(a.entry_ts);
+    const be = Date.parse(b.entry_ts);
+    if (ae !== be) return ae - be;
+    const ax = a.exit_ts ? Date.parse(a.exit_ts) : Number.POSITIVE_INFINITY;
+    const bx = b.exit_ts ? Date.parse(b.exit_ts) : Number.POSITIVE_INFINITY;
+    return ax - bx;
   });
 }
 

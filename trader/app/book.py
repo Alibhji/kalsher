@@ -66,6 +66,28 @@ def mid_price(quotes: dict[str, Decimal | None], side: str) -> Decimal | None:
     return None
 
 
+# Float ZINCRBY residue on Redis size scores — ignore dust levels.
+_BOOK_DUST = Decimal("0.000001")
+
+
+def normalize_bid_levels(
+    levels: list[tuple[Decimal, Decimal]],
+) -> list[tuple[Decimal, Decimal]]:
+    """Sort bids best-price-first (desc). Redis ZSET score is size, not price."""
+    out = [(p, q) for p, q in levels if q >= _BOOK_DUST]
+    out.sort(key=lambda item: item[0], reverse=True)
+    return out
+
+
+def asks_from_opposite_bids(
+    bids: list[tuple[Decimal, Decimal]],
+) -> list[tuple[Decimal, Decimal]]:
+    """YES/NO asks from complementary bids: ask = 1 - bid, best ask first (asc)."""
+    asks = [(Decimal("1") - p, q) for p, q in bids]
+    asks.sort(key=lambda item: item[0])
+    return asks
+
+
 async def read_book_levels(redis: aioredis.Redis, ticker: str, side: str) -> list[tuple[Decimal, Decimal]]:
     """Return [(price, size), ...] sorted best bid first (highest price)."""
     key = f"kalshi:book:{ticker}:{side}"
@@ -75,29 +97,29 @@ async def read_book_levels(redis: aioredis.Redis, ticker: str, side: str) -> lis
         size_d = Decimal(str(size))
         if size_d > 0:
             levels.append((Decimal(price_str), size_d))
-    return levels
+    return normalize_bid_levels(levels)
 
 
 def yes_ask_from_no_book(no_bids: list[tuple[Decimal, Decimal]]) -> Decimal | None:
-    if not no_bids:
+    bids = normalize_bid_levels(no_bids)
+    if not bids:
         return None
-    best_no_bid = no_bids[0][0]
-    return Decimal("1") - best_no_bid
+    return Decimal("1") - bids[0][0]
 
 
 async def get_ask_levels_for_buy(
     redis: aioredis.Redis, ticker: str, side: str
 ) -> list[tuple[Decimal, Decimal]]:
-    """Levels to walk when buying `side` (price, available_qty)."""
+    """Levels to walk when buying `side` (price, available_qty), best ask first."""
     if side == "yes":
         no_bids = await read_book_levels(redis, ticker, "no")
-        return [(Decimal("1") - p, q) for p, q in no_bids]
+        return asks_from_opposite_bids(no_bids)
     yes_bids = await read_book_levels(redis, ticker, "yes")
-    return [(Decimal("1") - p, q) for p, q in yes_bids]
+    return asks_from_opposite_bids(yes_bids)
 
 
 async def get_bid_levels_for_sell(
     redis: aioredis.Redis, ticker: str, side: str
 ) -> list[tuple[Decimal, Decimal]]:
-    """Levels to walk when selling `side`."""
+    """Levels to walk when selling `side` (best bid first)."""
     return await read_book_levels(redis, ticker, side)

@@ -73,6 +73,7 @@ export function ArchiveDetailPage({ eventTicker, experimentId }: Props) {
       setMarkets(marketRows);
       setExperiments(expRows);
 
+      const explicitExp = Boolean(experimentId);
       let nextExpId = experimentId ?? "";
       if (!nextExpId) {
         try {
@@ -90,7 +91,13 @@ export function ArchiveDetailPage({ eventTicker, experimentId }: Props) {
           // ignore
         }
       }
-      if (!nextExpId && expRows.length > 0) nextExpId = expRows[0].id;
+      const known = expRows.some((e) => e.id === nextExpId);
+      if (!nextExpId && expRows.length > 0) {
+        nextExpId = expRows[0].id;
+      } else if (nextExpId && !known && !explicitExp && expRows.length > 0) {
+        // Stale session pick that never traded this event — fall back.
+        nextExpId = expRows[0].id;
+      }
       setSelectedExpId(nextExpId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load archived bet");
@@ -111,9 +118,10 @@ export function ArchiveDetailPage({ eventTicker, experimentId }: Props) {
     let cancelled = false;
     setTripsLoading(true);
 
-    void fetchRoundTrips(selectedExpId)
+    void fetchRoundTrips(selectedExpId, undefined, { event_ticker: eventTicker })
       .then((rows) => {
         if (cancelled) return;
+        // Server scopes via markets.event_ticker; heuristic is a safety net.
         setRoundTrips(filterTripsForEvent(rows, eventTicker));
       })
       .catch(() => {
@@ -426,7 +434,7 @@ export function ArchiveDetailPage({ eventTicker, experimentId }: Props) {
                   </div>
                 </section>
               </>
-            ) : selectedExpId && experiments.length > 0 ? (
+            ) : selectedExpId && !tripsLoading ? (
               <p className="text-sm text-ink-500">
                 No closed trades for this window in the selected experiment.
               </p>

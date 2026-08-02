@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -8,6 +9,10 @@ from common.kalshi.rest import KalshiRest
 
 from trader.app.capital import cumulative_capital, deposits_in_period
 from trader.app.settlement import TERMINAL_STATUSES, settlement_price
+
+# Short TTL so live /state polling does not re-hit Kalshi every 2–10s.
+_KALSHI_FILLS_CACHE_TTL_S = 18.0
+_kalshi_fills_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _parse_kalshi_ts(raw: dict[str, Any]) -> datetime:
@@ -20,9 +25,45 @@ def _parse_kalshi_ts(raw: dict[str, Any]) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _legacy_side_action(raw: dict[str, Any]) -> tuple[str, str] | None:
+    """Return (side, action) from deprecated Kalshi fields when both are valid."""
+    side = str(raw.get("side") or "").lower()
+    action = str(raw.get("action") or "").lower()
+    if side in ("yes", "no") and action in ("buy", "sell"):
+        return side, action
+    return None
+
+
+def _side_action_from_book(raw: dict[str, Any]) -> tuple[str, str]:
+    """Map outcome_side + book_side when legacy action/side are absent.
+
+    Kalshi collapses buy-yes≡sell-no and buy-no≡sell-yes. Prefer the yes-leg
+    close (sell yes) for ask+no so FIFO can close yes lots from our common path.
+    """
+    outcome = str(raw.get("outcome_side") or "").lower()
+    book = str(raw.get("book_side") or "").lower()
+    if book == "bid" and outcome == "yes":
+        return "yes", "buy"
+    if book == "ask" and outcome == "no":
+        return "yes", "sell"
+    if book == "ask" and outcome == "yes":
+        return "yes", "sell"
+    if book == "bid" and outcome == "no":
+        return "no", "sell"
+    if outcome == "no":
+        return "no", "buy"
+    return "yes", "buy"
+
+
+def resolve_kalshi_side_action(raw: dict[str, Any]) -> tuple[str, str]:
+    legacy = _legacy_side_action(raw)
+    if legacy is not None:
+        return legacy
+    return _side_action_from_book(raw)
+
+
 def normalize_kalshi_fill(raw: dict[str, Any], *, source: str) -> dict[str, Any]:
-    side = str(raw.get("side") or raw.get("outcome_side") or "yes").lower()
-    action = str(raw.get("action") or "buy").lower()
+    side, action = resolve_kalshi_side_action(raw)
     qty = Decimal(str(raw.get("count_fp") or raw.get("count") or 0))
     if side == "yes":
         price = Decimal(str(raw.get("yes_price_dollars") or raw.get("price") or 0))
@@ -80,7 +121,15 @@ async def fetch_all_kalshi_fills(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
+    use_cache: bool = True,
 ) -> list[dict[str, Any]]:
+    cache_key = f"{id(client)}:{int(start.timestamp()) if start else ''}:{int(end.timestamp()) if end else ''}"
+    now = time.monotonic()
+    if use_cache:
+        hit = _kalshi_fills_cache.get(cache_key)
+        if hit and now - hit[0] < _KALSHI_FILLS_CACHE_TTL_S:
+            return [dict(r) for r in hit[1]]
+
     min_ts = int(start.timestamp()) if start else None
     max_ts = int(end.timestamp()) if end else None
     live = await _paginate_kalshi_fills(client, "/portfolio/fills", min_ts=min_ts, max_ts=max_ts)
@@ -104,7 +153,13 @@ async def fetch_all_kalshi_fills(
     merged.sort(key=lambda r: r["ts"])
     if start or end:
         merged = [r for r in merged if _in_range(r["ts"], start, end)]
-    return merged
+    if use_cache:
+        _kalshi_fills_cache[cache_key] = (now, merged)
+    return [dict(r) for r in merged]
+
+
+def clear_kalshi_fills_cache() -> None:
+    _kalshi_fills_cache.clear()
 
 
 def _in_range(ts: datetime, start: datetime | None, end: datetime | None) -> bool:
@@ -308,37 +363,56 @@ async def simulate_round_trips_with_settlements(
     return closed + settled
 
 
+def _apply_pnl_to_fill(
+    row: dict[str, Any],
+    net: Decimal | None,
+    basis: Decimal | None,
+) -> None:
+    if net is None or basis is None or basis <= 0:
+        row["trade_pnl"] = None
+        row["trade_pnl_pct"] = None
+        return
+    row["trade_pnl"] = net
+    row["trade_pnl_pct"] = (net / basis) * Decimal("100")
+
+
 async def annotate_fills_pnl_with_settlements(
     client: KalshiRest,
     fills: list[dict[str, Any]],
     *,
     end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Attach realized P&L to fills, including synthetic settlement on expired markets."""
+    """Attach realized P&L once per close: on sell fills, or entry buy for settlements."""
     closed, open_lots = _fifo_simulate(fills)
     settled = await _synthetic_settlement_closes(client, open_lots, end=end)
-    pnl_by_entry: dict[str, tuple[Decimal, Decimal]] = {}
-    for rt in closed + settled:
+
+    # Settlement-only: no sell fill exists → attribute to entry buy.
+    settlement_by_entry: dict[str, tuple[Decimal, Decimal]] = {}
+    for rt in settled:
         fill_id = rt.get("entry_fill_id")
         if not fill_id:
             continue
         net = Decimal(str(rt["net_pnl"]))
         basis = Decimal(str(rt["entry_price"])) * Decimal(str(rt["qty"]))
-        prev_net, prev_basis = pnl_by_entry.get(str(fill_id), (Decimal("0"), Decimal("0")))
-        pnl_by_entry[str(fill_id)] = (prev_net + net, prev_basis + basis)
+        prev_net, prev_basis = settlement_by_entry.get(str(fill_id), (Decimal("0"), Decimal("0")))
+        settlement_by_entry[str(fill_id)] = (prev_net + net, prev_basis + basis)
 
     out = annotate_fills_pnl(fills)
     for row in out:
         key = str(row.get("id") or "")
-        if key in pnl_by_entry:
-            net, basis = pnl_by_entry[key]
-            row["trade_pnl"] = net
-            row["trade_pnl_pct"] = (net / basis * Decimal("100")) if basis > 0 else None
+        if key in settlement_by_entry:
+            # Settlement P&L on entry; clear any sell attribution (none expected).
+            net, basis = settlement_by_entry[key]
+            _apply_pnl_to_fill(row, net, basis)
+        elif str(row.get("action") or "").lower() == "buy":
+            # Never show close P&L on buys when a sell already carries it.
+            row["trade_pnl"] = None
+            row["trade_pnl_pct"] = None
     return out
 
 
 def annotate_fills_pnl(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach signed cash flow and realized P&L (on closing sells) to each fill."""
+    """Attach signed cash flow and realized P&L on closing sells only."""
     open_lots: dict[tuple[str, str], list[dict[str, Any]]] = {}
     out: list[dict[str, Any]] = []
 
@@ -365,6 +439,7 @@ def annotate_fills_pnl(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "qty": qty,
                     "entry_price": price,
                     "entry_fee": fee,
+                    "fill_id": row.get("id"),
                 }
             )
             out.append(row)
@@ -396,12 +471,9 @@ def annotate_fills_pnl(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
         open_lots[key] = lots
 
         if fill_basis > 0:
-            pct = (fill_net / fill_basis) * Decimal("100")
-            row["trade_pnl"] = fill_net
-            row["trade_pnl_pct"] = pct
+            _apply_pnl_to_fill(row, fill_net, fill_basis)
         else:
-            row["trade_pnl"] = None
-            row["trade_pnl_pct"] = None
+            _apply_pnl_to_fill(row, None, None)
         out.append(row)
 
     return out

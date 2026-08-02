@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchArchiveEvents, type ArchiveEvent } from "../api";
-import { fetchRoundTrips, listExperiments, type Experiment } from "../api/trading";
+import { fetchArchivePnl, listExperiments, type Experiment } from "../api/trading";
 import { AppNav } from "../components/AppNav";
 import { NotificationCenter } from "../components/NotificationCenter";
 import { PnlCell } from "../components/PnlCell";
 import { formatVolume } from "../lib/format";
-import { buildEventPnlByTicker, buildTradedEventsSet, formatArchiveWindow } from "../lib/archivePnl";
+import { formatArchiveWindow } from "../lib/archivePnl";
 import { marketStore } from "../store/marketStore";
 
 const ARCHIVE_EXP_KEY = "kalshi.archiveListExperimentId";
@@ -138,12 +138,20 @@ export function ArchivePage() {
       return;
     }
     let cancelled = false;
-    void fetchRoundTrips(selectedExpId)
-      .then((trips) => {
-        if (!cancelled) {
-          setEventPnl(buildEventPnlByTicker(trips));
-          setTradedEvents(buildTradedEventsSet(trips));
+    // Server joins markets.event_ticker — correct for both -T and 15M suffixes.
+    void fetchArchivePnl(selectedExpId)
+      .then((rows) => {
+        if (cancelled) return;
+        const pnl = new Map<string, number>();
+        const traded = new Set<string>();
+        for (const row of rows) {
+          traded.add(row.event_ticker);
+          if (row.trade_count > 0) {
+            pnl.set(row.event_ticker, Number(row.net_pnl));
+          }
         }
+        setEventPnl(pnl);
+        setTradedEvents(traded);
       })
       .catch(() => {
         if (!cancelled) {

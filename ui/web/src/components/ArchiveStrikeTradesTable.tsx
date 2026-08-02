@@ -1,6 +1,6 @@
 import { tradeLabel, type RoundTrip } from "../api/trading";
 import { PnlCell } from "./PnlCell";
-import { sumNetPnl } from "../lib/archivePnl";
+import { sortTripsChronologically, sumNetPnl } from "../lib/archivePnl";
 
 function formatTradePoint(iso: string, price: string): string {
   const t = new Date(iso).toLocaleString(undefined, {
@@ -20,7 +20,8 @@ type Props = {
 export function ArchiveStrikeTradesTable({ trips }: Props) {
   if (trips.length === 0) return null;
 
-  const subtotal = sumNetPnl(trips);
+  const ordered = sortTripsChronologically(trips);
+  const subtotal = sumNetPnl(ordered);
 
   return (
     <div className="mt-3 overflow-x-auto rounded border border-ink-800/80 bg-ink-950/60">
@@ -34,7 +35,7 @@ export function ArchiveStrikeTradesTable({ trips }: Props) {
           </tr>
         </thead>
         <tbody className="divide-y divide-ink-800/60">
-          {trips.map((rt) => {
+          {ordered.map((rt) => {
             const net = rt.net_pnl != null ? Number(rt.net_pnl) : null;
             const pct = rt.pnl_pct != null ? Number(rt.pnl_pct) : null;
             return (

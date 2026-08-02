@@ -319,6 +319,7 @@ class TradingStore:
         ticker: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        event_ticker: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses = ["experiment_id = $1"]
         vals: list[Any] = [experiment_id]
@@ -326,6 +327,12 @@ class TradingStore:
         if ticker:
             clauses.append(f"ticker = ${idx}")
             vals.append(ticker)
+            idx += 1
+        if event_ticker:
+            clauses.append(
+                f"ticker IN (SELECT m.ticker FROM markets m WHERE m.event_ticker = ${idx})"
+            )
+            vals.append(event_ticker)
             idx += 1
         if since:
             clauses.append(f"COALESCE(exit_ts, entry_ts) >= ${idx}")
@@ -338,6 +345,42 @@ class TradingStore:
         rows = await self.pool.fetch(
             f"SELECT * FROM trading.round_trips WHERE {' AND '.join(clauses)} ORDER BY entry_ts DESC",
             *vals,
+        )
+        return [dict(r) for r in rows]
+
+    async def list_tickers_for_event(self, event_ticker: str) -> list[str]:
+        rows = await self.pool.fetch(
+            "SELECT ticker FROM markets WHERE event_ticker = $1",
+            event_ticker,
+        )
+        return [str(r["ticker"]) for r in rows]
+
+    async def event_ticker_map(self, tickers: list[str]) -> dict[str, str]:
+        """Map market ticker → event_ticker for the given tickers."""
+        if not tickers:
+            return {}
+        rows = await self.pool.fetch(
+            "SELECT ticker, event_ticker FROM markets WHERE ticker = ANY($1::text[])",
+            tickers,
+        )
+        return {str(r["ticker"]): str(r["event_ticker"]) for r in rows if r.get("event_ticker")}
+
+    async def list_archive_pnl_for_experiment(self, experiment_id: UUID) -> list[dict[str, Any]]:
+        """Per-event closed P/L for archive list (markets.event_ticker join)."""
+        rows = await self.pool.fetch(
+            """
+            SELECT
+                m.event_ticker,
+                COUNT(*)::INT AS trip_count,
+                COUNT(*) FILTER (WHERE rt.exit_ts IS NOT NULL)::INT AS trade_count,
+                COALESCE(SUM(rt.net_pnl) FILTER (WHERE rt.exit_ts IS NOT NULL), 0) AS net_pnl
+            FROM trading.round_trips rt
+            JOIN markets m ON m.ticker = rt.ticker
+            WHERE rt.experiment_id = $1
+            GROUP BY m.event_ticker
+            ORDER BY MAX(COALESCE(rt.exit_ts, rt.entry_ts)) DESC NULLS LAST
+            """,
+            experiment_id,
         )
         return [dict(r) for r in rows]
 

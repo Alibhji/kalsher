@@ -79,7 +79,7 @@ async def apply_fill(
         else:
             new_avg = price
         cash -= notional + fee
-        await _open_round_trip(conn, experiment_id, ticker, side, qty, price)
+        await _open_round_trip(conn, experiment_id, ticker, side, qty, price, fee)
     else:
         if qty > pos_qty:
             raise ValueError(f"insufficient position: have {pos_qty}, sell {qty}")
@@ -154,18 +154,20 @@ async def _open_round_trip(
     side: str,
     qty: Decimal,
     price: Decimal,
+    fee: Decimal,
 ) -> None:
     await conn.execute(
         """
         INSERT INTO trading.round_trips
             (experiment_id, ticker, side, qty, entry_ts, entry_price, fees)
-        VALUES ($1, $2, $3, $4, NOW(), $5, 0)
+        VALUES ($1, $2, $3, $4, NOW(), $5, $6)
         """,
         experiment_id,
         ticker,
         side,
         qty,
         price,
+        fee,
     )
 
 
@@ -198,8 +200,11 @@ async def _close_round_trip(
         rt_qty = Decimal(str(row["qty"]))
         close_qty = min(remaining, rt_qty)
         entry_price = Decimal(str(row["entry_price"]))
+        stored_fees = Decimal(str(row["fees"]))
+        entry_fee_share = stored_fees * (close_qty / rt_qty) if rt_qty > 0 else Decimal("0")
+        exit_fee_share = fee * (close_qty / qty) if qty > 0 else Decimal("0")
+        rt_fees = entry_fee_share + exit_fee_share
         gross = (exit_price - entry_price) * close_qty
-        rt_fees = Decimal(str(row["fees"])) + fee * (close_qty / qty)
         net = gross - rt_fees
         entry_ts = await conn.fetchval("SELECT entry_ts FROM trading.round_trips WHERE id = $1", row["id"])
         hold_secs = int((datetime.now(timezone.utc) - entry_ts).total_seconds())
@@ -221,13 +226,15 @@ async def _close_round_trip(
                 row["id"],
             )
         else:
+            remain_fees = stored_fees - entry_fee_share
             await conn.execute(
                 """
                 UPDATE trading.round_trips
-                SET qty = $1
-                WHERE id = $2
+                SET qty = $1, fees = $2
+                WHERE id = $3
                 """,
                 rt_qty - close_qty,
+                remain_fees,
                 row["id"],
             )
             await conn.execute(

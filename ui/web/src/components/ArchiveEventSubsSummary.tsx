@@ -1,6 +1,6 @@
 import type { ArchiveMarket } from "../api";
 import type { RoundTrip } from "../api/trading";
-import { archiveMarketVolume, sumNetPnl } from "../lib/archivePnl";
+import { archiveMarketVolume, sortTripsChronologically, sumNetPnl } from "../lib/archivePnl";
 import { formatStrike, formatVolume } from "../lib/format";
 import { formatPnl, pnlColorClass, pnlTone } from "../lib/pnl";
 
@@ -23,7 +23,7 @@ export function ArchiveEventSubsSummary({ eventTicker, markets, tripsByTicker }:
   const rows = [...markets]
     .sort((a, b) => archiveMarketVolume(b.volume) - archiveMarketVolume(a.volume))
     .map((m) => {
-      const trips = tripsByTicker.get(m.ticker) ?? [];
+      const trips = sortTripsChronologically(tripsByTicker.get(m.ticker) ?? []);
       const closed = trips.filter((t) => t.exit_ts && t.exit_price);
       const first = trips[0];
       const lastClosed = closed[closed.length - 1];
