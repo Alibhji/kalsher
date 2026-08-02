@@ -3,7 +3,6 @@ import { fetchMarkets } from "./api";
 import { marketStore } from "./store/marketStore";
 import { useMarketStoreConnected, useStructuralMarketRows, useThrottledMarketRows } from "./store/useMarketStore";
 import { ResetPlatformButton } from "./components/ResetPlatformButton";
-import { ArchivePanel } from "./components/ArchivePanel";
 import { MarketFiltersBar } from "./components/MarketFilters";
 import { MarketsGrouped } from "./components/MarketsGrouped";
 import { OpenExposurePanel } from "./components/OpenExposurePanel";
@@ -12,6 +11,8 @@ import { NotificationCenter } from "./components/NotificationCenter";
 import { AppNav } from "./components/AppNav";
 import { ExperimentHistoryPage } from "./pages/ExperimentHistoryPage";
 import { ExperimentDetailPage } from "./pages/ExperimentDetailPage";
+import { ArchivePage } from "./pages/ArchivePage";
+import { ArchiveDetailPage } from "./pages/ArchiveDetailPage";
 import { useHashRoute } from "./lib/routes";
 import {
   applyMarketFilters,
@@ -35,6 +36,17 @@ export default function App() {
   }
   if (route.page === "history-detail") {
     return <ExperimentDetailPage experimentId={route.experimentId} />;
+  }
+  if (route.page === "archive") {
+    return <ArchivePage />;
+  }
+  if (route.page === "archive-detail") {
+    return (
+      <ArchiveDetailPage
+        eventTicker={route.eventTicker}
+        experimentId={route.experimentId}
+      />
+    );
   }
 
   return <MarketsDashboard />;
@@ -155,8 +167,8 @@ function MarketsDashboard() {
             <p className="text-xs font-medium uppercase tracking-[0.2em] text-accent">Kalshi live</p>
             <h1 className="mt-1 text-3xl font-semibold tracking-tight text-ink-50">Active Markets</h1>
             <p className="mt-2 max-w-xl text-sm text-ink-400">
-              Live dashboard only — open bets for the current window. Expired markets move to archive;
-              charts fetch incrementally to keep the browser light.
+              Live dashboard only — open bets for the current window. Settled markets appear in the
+              Archive tab.
             </p>
           </div>
         </div>
@@ -203,7 +215,6 @@ function MarketsDashboard() {
               filters.minVolume > 0
             }
           />
-          <ArchivePanel />
         </>
       ) : null}
       </div>

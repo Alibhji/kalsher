@@ -73,6 +73,16 @@ class ExperimentOut(BaseModel):
     archived_at: str | None = None
 
 
+class ExperimentForEventOut(BaseModel):
+    id: UUID
+    name: str
+    mode: str
+    fill_count: int
+    trade_count: int
+    net_pnl: str
+    last_activity: str | None = None
+
+
 class PositionOut(BaseModel):
     ticker: str
     side: str

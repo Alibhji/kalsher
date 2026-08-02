@@ -14,6 +14,16 @@ export type Experiment = {
   tags?: string[];
 };
 
+export type ExperimentForEvent = {
+  id: string;
+  name: string;
+  mode: "paper" | "live";
+  fill_count: number;
+  trade_count: number;
+  net_pnl: string;
+  last_activity: string | null;
+};
+
 export type ExperimentStats = {
   experiment_id: string;
   name: string;
@@ -188,6 +198,10 @@ export async function listExperiments(includeArchived = false, tag?: string): Pr
   if (tag) params.set("tag", tag);
   const qs = params.toString();
   return tradingFetch(`/experiments${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchExperimentsForEvent(eventTicker: string): Promise<ExperimentForEvent[]> {
+  return tradingFetch(`/experiments/by_event/${encodeURIComponent(eventTicker)}`);
 }
 
 export async function fetchExperiment(experimentId: string): Promise<Experiment> {

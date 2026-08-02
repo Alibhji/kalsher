@@ -341,6 +341,55 @@ class TradingStore:
         )
         return [dict(r) for r in rows]
 
+    async def list_experiments_for_event(self, event_ticker: str) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            WITH event_tickers AS (
+                SELECT ticker FROM markets WHERE event_ticker = $1
+            ),
+            exp_ids AS (
+                SELECT DISTINCT f.experiment_id
+                FROM trading.fills f
+                WHERE f.ticker IN (SELECT ticker FROM event_tickers)
+            )
+            SELECT
+                e.id,
+                e.name,
+                e.mode,
+                e.status,
+                e.created_at,
+                e.archived_at,
+                (
+                    SELECT COUNT(*)::INT FROM trading.fills f
+                    WHERE f.experiment_id = e.id
+                      AND f.ticker IN (SELECT ticker FROM event_tickers)
+                ) AS fill_count,
+                (
+                    SELECT COUNT(*)::INT FROM trading.round_trips rt
+                    WHERE rt.experiment_id = e.id
+                      AND rt.ticker IN (SELECT ticker FROM event_tickers)
+                      AND rt.exit_ts IS NOT NULL
+                ) AS trade_count,
+                (
+                    SELECT COALESCE(SUM(rt.net_pnl), 0)
+                    FROM trading.round_trips rt
+                    WHERE rt.experiment_id = e.id
+                      AND rt.ticker IN (SELECT ticker FROM event_tickers)
+                      AND rt.exit_ts IS NOT NULL
+                ) AS net_pnl,
+                (
+                    SELECT MAX(f.ts) FROM trading.fills f
+                    WHERE f.experiment_id = e.id
+                      AND f.ticker IN (SELECT ticker FROM event_tickers)
+                ) AS last_activity
+            FROM trading.experiments e
+            WHERE e.id IN (SELECT experiment_id FROM exp_ids)
+            ORDER BY last_activity DESC NULLS LAST
+            """,
+            event_ticker,
+        )
+        return [dict(r) for r in rows]
+
     async def list_open_round_trips(
         self, experiment_id: UUID, ticker: str | None = None
     ) -> list[dict[str, Any]]:

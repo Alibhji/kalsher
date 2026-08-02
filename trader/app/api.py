@@ -37,6 +37,7 @@ from trader.app.schemas import (
     CloseAllRequest,
     ExperimentCreate,
     ExperimentOut,
+    ExperimentForEventOut,
     ExperimentPatch,
     FillOut,
     OrderOut,
@@ -328,6 +329,25 @@ def create_router(app_state: Any) -> APIRouter:
     ):
         rows = await exp_svc().list_all(include_archived=include_archived, tag=tag)
         return [_exp_out(r) for r in rows]
+
+    @router.get("/experiments/by_event/{event_ticker}", response_model=list[ExperimentForEventOut])
+    async def list_experiments_for_event(event_ticker: str):
+        rows = await store().list_experiments_for_event(event_ticker)
+        out: list[ExperimentForEventOut] = []
+        for row in rows:
+            last = row.get("last_activity")
+            out.append(
+                ExperimentForEventOut(
+                    id=row["id"],
+                    name=row["name"],
+                    mode=row["mode"],
+                    fill_count=int(row["fill_count"] or 0),
+                    trade_count=int(row["trade_count"] or 0),
+                    net_pnl=str(row["net_pnl"] if row["net_pnl"] is not None else "0"),
+                    last_activity=last.isoformat() if last else None,
+                )
+            )
+        return out
 
     @router.get("/experiments/{exp_id}", response_model=ExperimentOut)
     async def get_experiment(exp_id: UUID):

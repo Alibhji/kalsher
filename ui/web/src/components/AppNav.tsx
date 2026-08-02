@@ -1,9 +1,9 @@
 type Props = {
-  active: "markets" | "history";
+  active: "markets" | "archive" | "history";
 };
 
 export function AppNav({ active }: Props) {
-  const link = (page: "markets" | "history", href: string, label: string) => (
+  const link = (page: "markets" | "archive" | "history", href: string, label: string) => (
     <a
       href={href}
       className={`rounded px-3 py-1.5 text-sm font-medium transition-colors ${
@@ -19,6 +19,7 @@ export function AppNav({ active }: Props) {
   return (
     <nav className="flex flex-wrap items-center gap-1">
       {link("markets", "#/", "Markets")}
+      {link("archive", "#/archive", "Archive")}
       {link("history", "#/history", "Trade History")}
     </nav>
   );

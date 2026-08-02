@@ -11,7 +11,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { fetchMarketHistory, type MarketHistory } from "../api";
-import { tradeLabel } from "../api/trading";
+import { tradeLabel, type RoundTrip } from "../api/trading";
 import { chartCentsForSide, formatPnl, formatPnlPct } from "../lib/pnl";
 import { useMarketRow } from "../store/useMarketStore";
 import { useOpenOrders, useRoundTrips } from "../store/useTradingStore";
@@ -28,6 +28,10 @@ type Props = {
   kalshiUrl: string;
   chartHeight?: number;
   className?: string;
+  /** When set (e.g. archive detail), use these trips instead of tradingStore cache. */
+  roundTrips?: RoundTrip[];
+  /** Use "In" / "Out" marker labels (archive detail). */
+  tradeMarkerLabels?: "default" | "in-out";
 };
 
 type ChartTab = "price" | "flow" | "rules";
@@ -103,6 +107,8 @@ export function MarketChart({
   kalshiUrl,
   chartHeight = CHART_H,
   className = "",
+  roundTrips: roundTripsProp,
+  tradeMarkerLabels = "default",
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -117,7 +123,8 @@ export function MarketChart({
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const updatedAtRef = useRef<number>(0);
   const live = useMarketRow(ticker);
-  const roundTrips = useRoundTrips(ticker);
+  const storeRoundTrips = useRoundTrips(ticker);
+  const roundTrips = roundTripsProp ?? storeRoundTrips;
   const openOrders = useOpenOrders(ticker);
   const windowOpen = openTime ?? history?.open_time ?? null;
   const markersKeyRef = useRef<string>("");
@@ -408,7 +415,10 @@ export function MarketChart({
       const entryPrice = Number(rt.entry_price);
       const entryCents = chartCentsForSide(rt.side, entryPrice);
       const cost = Number(rt.cost_basis);
-      const entryLabel = `${tradeLabel(rt.side, "buy")} · ${Math.round(entryPrice * 100)}¢ · $${cost.toFixed(2)}`;
+      const inOut = tradeMarkerLabels === "in-out";
+      const entryLabel = inOut
+        ? `In · ${Math.round(entryPrice * 100)}¢ · $${cost.toFixed(2)}`
+        : `${tradeLabel(rt.side, "buy")} · ${Math.round(entryPrice * 100)}¢ · $${cost.toFixed(2)}`;
 
       markers.push({
         time: entrySec,
@@ -425,12 +435,15 @@ export function MarketChart({
         const net = rt.net_pnl != null ? Number(rt.net_pnl) : 0;
         const pct = rt.pnl_pct != null ? Number(rt.pnl_pct) : 0;
         const pnlStr = `${formatPnl(net)} (${formatPnlPct(pct)})`;
+        const exitLabel = inOut
+          ? `Out · ${Math.round(exitPrice * 100)}¢ · ${pnlStr}`
+          : `${tradeLabel(rt.side, "sell")} · ${Math.round(exitPrice * 100)}¢ · ${pnlStr}`;
         markers.push({
           time: exitSec,
           position: "aboveBar",
           color: net >= 0 ? "#0ECB81" : "#F6465D",
           shape: "arrowDown",
-          text: `${tradeLabel(rt.side, "sell")} · ${Math.round(exitPrice * 100)}¢ · ${pnlStr}`,
+          text: exitLabel,
         });
         void exitCents;
       }
@@ -445,7 +458,7 @@ export function MarketChart({
     if (markersKey === markersKeyRef.current) return;
     markersKeyRef.current = markersKey;
     seriesRef.current.setMarkers(markers);
-  }, [openOrders, roundTrips, tab, state, windowOpen]);
+  }, [openOrders, roundTrips, tab, state, windowOpen, roundTripsProp, tradeMarkerLabels]);
 
   useEffect(() => {
     const series = seriesRef.current;

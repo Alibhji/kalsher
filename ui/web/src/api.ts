@@ -177,6 +177,18 @@ export async function fetchArchiveTree(series?: string, limit = 30): Promise<Arc
   return Array.isArray(payload.series) ? payload.series : [];
 }
 
+export async function fetchArchiveEvents(series?: string, limit = 40): Promise<ArchiveEvent[]> {
+  const params = new URLSearchParams();
+  if (series) params.set("series", series);
+  params.set("limit", String(limit));
+  const res = await fetch(`/api/archive/events?${params}`);
+  if (!res.ok) {
+    throw new Error(`Failed to load archive events (${res.status})`);
+  }
+  const payload = (await res.json()) as { events?: ArchiveEvent[] };
+  return Array.isArray(payload.events) ? payload.events : [];
+}
+
 export async function fetchArchiveEventMarkets(eventTicker: string): Promise<ArchiveMarket[]> {
   const res = await fetch(`/api/archive/events/${encodeURIComponent(eventTicker)}/markets`);
   if (!res.ok) {
