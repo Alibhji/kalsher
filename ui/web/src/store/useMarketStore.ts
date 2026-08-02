@@ -29,6 +29,26 @@ export function useLiveGroupVolume(tickers: readonly string[]): number {
   );
 }
 
+export function useMarketListVersion(): number {
+  return useSyncExternalStore(
+    (listener) => marketStore.subscribeAll(listener),
+    () => marketStore.getListVersion(),
+    () => marketStore.getListVersion(),
+  );
+}
+
+/** Stable market rows — only changes when markets are added/removed/resynced. */
+export function useStructuralMarketRows(): MarketRow[] {
+  const listVersion = useMarketListVersion();
+  const [rows, setRows] = useState<MarketRow[]>(() => marketStore.getSnapshot());
+
+  useEffect(() => {
+    setRows(marketStore.getSnapshot());
+  }, [listVersion]);
+
+  return rows;
+}
+
 export function useMarketStoreRows(): MarketRow[] {
   return useSyncExternalStore(
     (listener) => marketStore.subscribeAll(listener),
@@ -39,12 +59,8 @@ export function useMarketStoreRows(): MarketRow[] {
 
 /** Fresh rows for filters/sorting; quote fields update on interval, not every tick. */
 export function useThrottledMarketRows(intervalMs: number): MarketRow[] {
-  const listVersion = useSyncExternalStore(
-    (listener) => marketStore.subscribeAll(listener),
-    () => marketStore.getListVersion(),
-    () => marketStore.getListVersion(),
-  );
-  const [rows, setRows] = useState<MarketRow[]>(() => marketStore.getSnapshot());
+  const listVersion = useMarketListVersion();
+  const [rows, setRows] = useState<MarketRow[]>(() => marketStore.getFreshRows());
 
   useEffect(() => {
     setRows(marketStore.getFreshRows());

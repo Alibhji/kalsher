@@ -1,8 +1,10 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { MarketRow } from "../api";
 import { groupMarkets, type EventGroup, type SeriesGroup } from "../lib/groupMarkets";
 import { marketHasLiquidity } from "../lib/filters";
 import { useMarketRow, useLiveGroupVolume } from "../store/useMarketStore";
+import { tradingStore } from "../store/tradingStore";
+import { useTradingStore } from "../store/useTradingStore";
 import {
   countdownTone,
   formatCents,
@@ -53,6 +55,17 @@ function collapseKey(prefix: string, id: string): string {
   return `${prefix}:${id}`;
 }
 
+function findMarketPath(groups: SeriesGroup[], ticker: string): { seriesTicker: string; eventTicker: string } | null {
+  for (const series of groups) {
+    for (const event of series.events) {
+      if (event.markets.some((m) => m.ticker === ticker)) {
+        return { seriesTicker: series.seriesTicker, eventTicker: event.eventTicker };
+      }
+    }
+  }
+  return null;
+}
+
 export function MarketsGrouped({
   markets,
   nowMs,
@@ -71,11 +84,45 @@ export function MarketsGrouped({
       }),
     [markets, sortSubByVolume, sortParentByVolume, hideNoLiquidity],
   );
+
+  const groupStructureKey = useMemo(
+    () =>
+      groups
+        .map((g) =>
+          `${g.seriesTicker}:${g.events
+            .map((e) => `${e.eventTicker}{${[...e.markets.map((m) => m.ticker)].sort().join(",")}}`)
+            .join(";")}`,
+        )
+        .join("|"),
+    [groups],
+  );
   const [visible, setVisible] = useState(false);
   const [expandedSeries, setExpandedSeries] = useState<Set<string>>(() => new Set());
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(() => new Set());
   const [expandedChart, setExpandedChart] = useState<string | null>(null);
   const [groupsInitialized, setGroupsInitialized] = useState(false);
+  const { focusTicker, focusSeq } = useTradingStore();
+  const lastHandledFocus = useRef(0);
+
+  useEffect(() => {
+    if (!focusTicker || focusSeq === 0 || focusSeq === lastHandledFocus.current) return;
+    lastHandledFocus.current = focusSeq;
+
+    const path = findMarketPath(groups, focusTicker);
+    if (path) {
+      setExpandedSeries((prev) => new Set(prev).add(path.seriesTicker));
+      setExpandedEvents((prev) => new Set(prev).add(collapseKey(path.seriesTicker, path.eventTicker)));
+    }
+    setExpandedChart(focusTicker);
+
+    const timer = window.setTimeout(() => {
+      document.getElementById(`market-chart-anchor-${focusTicker}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [focusSeq, focusTicker, groups]);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setVisible(true));
@@ -88,8 +135,10 @@ export function MarketsGrouped({
       setExpandedSeries(new Set(groups.map((g) => g.seriesTicker)));
       setGroupsInitialized(true);
     }
+  }, [groups, groupsInitialized]);
 
-    // Keep user-expanded events across polls; drop keys that no longer exist.
+  useEffect(() => {
+    // Only reconcile expand state when series/events/strikes are added or removed.
     setExpandedEvents((prev) => {
       const validKeys = new Set(
         groups.flatMap((g) => g.events.map((e) => collapseKey(g.seriesTicker, e.eventTicker))),
@@ -103,7 +152,25 @@ export function MarketsGrouped({
       }
       return next;
     });
-  }, [groups, groupsInitialized]);
+
+    setExpandedSeries((prev) => {
+      const validSeries = new Set(groups.map((g) => g.seriesTicker));
+      const next = new Set<string>();
+      for (const key of prev) {
+        if (validSeries.has(key)) next.add(key);
+      }
+      if (next.size === prev.size && [...next].every((key) => prev.has(key))) {
+        return prev;
+      }
+      return next;
+    });
+
+    setExpandedChart((prev) => {
+      if (!prev) return prev;
+      const validTickers = new Set(groups.flatMap((g) => g.events.flatMap((e) => e.markets.map((m) => m.ticker))));
+      return validTickers.has(prev) ? prev : null;
+    });
+  }, [groupStructureKey]);
 
   function toggleSeries(seriesTicker: string) {
     const series = groups.find((g) => g.seriesTicker === seriesTicker);
@@ -213,7 +280,11 @@ export function MarketsGrouped({
                 expandedChart={expandedChart}
                 onToggleSeries={() => toggleSeries(series.seriesTicker)}
                 onToggleEvent={(eventTicker) => toggleEvent(series.seriesTicker, eventTicker)}
-                onToggleChart={(ticker) => setExpandedChart(expandedChart === ticker ? null : ticker)}
+                onToggleChart={(ticker) => {
+                  const next = expandedChart === ticker ? null : ticker;
+                  setExpandedChart(next);
+                  tradingStore.setSelectedTicker(next);
+                }}
               />
             ))}
           </tbody>
@@ -357,7 +428,7 @@ function EventSection({
       </tr>
       {expanded
         ? event.markets.map((market, i) => (
-            <MarketRowView
+            <MemoMarketRowView
               key={market.ticker}
               market={market}
               nowMs={nowMs}
@@ -437,9 +508,10 @@ function MarketRowView({ market, nowMs, stripe, expandedChart, onToggleChart }: 
         </td>
       </tr>
       {expandedChart && liquid ? (
-        <tr className="bg-ink-950">
+        <tr id={`market-chart-anchor-${live.ticker}`} className="bg-ink-950">
           <td colSpan={7} className="p-0">
             <MarketChart
+              key={live.ticker}
               ticker={live.ticker}
               label={label}
               openTime={live.open_time}
@@ -452,3 +524,5 @@ function MarketRowView({ market, nowMs, stripe, expandedChart, onToggleChart }: 
     </Fragment>
   );
 }
+
+const MemoMarketRowView = memo(MarketRowView);

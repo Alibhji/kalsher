@@ -99,7 +99,7 @@ class KalshiRest:
         return await self.get("/portfolio/fills", params)
 
     async def create_order(self, body: dict[str, Any]) -> dict[str, Any]:
-        return await self.post("/portfolio/orders", body)
+        return await self.post("/portfolio/events/orders", body)
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
-        return await self.delete(f"/portfolio/orders/{order_id}")
+        return await self.delete(f"/portfolio/events/orders/{order_id}")

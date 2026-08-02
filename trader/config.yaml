@@ -1,0 +1,13 @@
+fees:
+  model: kalshi
+  maker_bps: 0
+fill:
+  model: book_walk
+  require_trade_through: false
+  max_slippage_e4: 200
+guards:
+  max_order_qty: 1000
+  max_position_per_market: 5000
+  reject_if_book_stale: true
+mark_interval_sec: 1
+rest_rps: 10

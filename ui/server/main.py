@@ -20,6 +20,7 @@ from ui.server.maintenance import CONFIRM_PHRASE, reset_platform
 from ui.server.markets import fetch_markets
 from ui.server.rules import fetch_market_rules
 from ui.server.trades import fetch_trades_for_ticker, parse_since_param
+from ui.server.trading_proxy import proxy_trading
 from ui.server.ws import WsManager
 
 log = get_logger(__name__)
@@ -57,6 +58,7 @@ class UiApp:
         self._feed.set_on_structure_change(self._ws_manager.on_structure_change)
 
         app = web.Application()
+        app["settings"] = self.settings
         app.router.add_get("/healthz", self._healthz)
         app.router.add_get("/metrics", self._metrics)
         app.router.add_get("/ws", self._ws)
@@ -68,6 +70,7 @@ class UiApp:
         app.router.add_get("/api/archive/events", self._api_archive_events)
         app.router.add_get("/api/archive/events/{event_ticker}/markets", self._api_archive_event_markets)
         app.router.add_post("/api/admin/reset-platform", self._api_reset_platform)
+        app.router.add_route("*", "/api/trading/{tail:.*}", proxy_trading)
 
         if STATIC_DIR.is_dir():
             app.router.add_static("/assets", STATIC_DIR / "assets", show_index=False)

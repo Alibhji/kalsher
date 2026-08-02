@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { createChart, type IChartApi, type ISeriesApi, type LineData, type UTCTimestamp } from "lightweight-charts";
+import { createChart, type IChartApi, type ISeriesApi, type LineData, type SeriesMarker, type UTCTimestamp } from "lightweight-charts";
 import { fetchMarketHistory, type MarketHistory } from "../api";
+import { tradeLabel } from "../api/trading";
+import { chartCentsForSide, formatPnl, formatPnlPct } from "../lib/pnl";
 import { useMarketRow } from "../store/useMarketStore";
+import { useRoundTrips } from "../store/useTradingStore";
 import { seedTradesSinceOpen } from "../store/useTradeStore";
 import { KalshiLink } from "./KalshiLink";
 import { MarketFlowPanel } from "./MarketFlowPanel";
@@ -94,7 +97,9 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const updatedAtRef = useRef<number>(0);
   const live = useMarketRow(ticker);
+  const roundTrips = useRoundTrips(ticker);
   const windowOpen = openTime ?? history?.open_time ?? null;
+  const markersKeyRef = useRef<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -114,6 +119,7 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
     lastPointTimeRef.current = null;
     lastPointTsRef.current = null;
     closedRef.current = false;
+    markersKeyRef.current = "";
     setState("loading");
     setError(null);
     setHistory(null);
@@ -274,6 +280,53 @@ export function MarketChart({ ticker, label, openTime, closeTime, kalshiUrl }: P
       setUpdatedAt(new Date(now));
     }
   }, [live?.yes_bid_cents, live?.yes_ask_cents, state, tab, ticker, openTime, closeTime]);
+
+  useEffect(() => {
+    if (tab !== "price" || state !== "ready" || !seriesRef.current) return;
+    const windowStartMs = windowOpen ? Date.parse(windowOpen) : 0;
+    const markers: SeriesMarker<UTCTimestamp>[] = [];
+
+    for (const rt of roundTrips) {
+      if (windowStartMs && Date.parse(rt.entry_ts) < windowStartMs) continue;
+      const entrySec = Math.floor(Date.parse(rt.entry_ts) / 1000) as UTCTimestamp;
+      const entryPrice = Number(rt.entry_price);
+      const entryCents = chartCentsForSide(rt.side, entryPrice);
+      const cost = Number(rt.cost_basis);
+      const entryLabel = `${tradeLabel(rt.side, "buy")} · ${Math.round(entryPrice * 100)}¢ · $${cost.toFixed(2)}`;
+
+      markers.push({
+        time: entrySec,
+        position: "belowBar",
+        color: rt.side === "yes" ? "#0ECB81" : "#F6465D",
+        shape: "arrowUp",
+        text: rt.exit_ts ? entryLabel : `${entryLabel} · open`,
+      });
+
+      if (rt.exit_ts && rt.exit_price) {
+        const exitSec = Math.floor(Date.parse(rt.exit_ts) / 1000) as UTCTimestamp;
+        const exitPrice = Number(rt.exit_price);
+        const exitCents = chartCentsForSide(rt.side, exitPrice);
+        const net = rt.net_pnl != null ? Number(rt.net_pnl) : 0;
+        const pct = rt.pnl_pct != null ? Number(rt.pnl_pct) : 0;
+        const pnlStr = `${formatPnl(net)} (${formatPnlPct(pct)})`;
+        markers.push({
+          time: exitSec,
+          position: "aboveBar",
+          color: net >= 0 ? "#0ECB81" : "#F6465D",
+          shape: "arrowDown",
+          text: `${tradeLabel(rt.side, "sell")} · ${Math.round(exitPrice * 100)}¢ · ${pnlStr}`,
+        });
+        void exitCents;
+      }
+      void entryCents;
+    }
+
+    markers.sort((a, b) => (a.time as number) - (b.time as number));
+    const markersKey = markers.map((m) => `${m.time}:${m.text}`).join("|");
+    if (markersKey === markersKeyRef.current) return;
+    markersKeyRef.current = markersKey;
+    seriesRef.current.setMarkers(markers);
+  }, [roundTrips, tab, state, windowOpen]);
 
   const windowLabel = formatWindow(history?.window_start ?? openTime, history?.window_end ?? closeTime);
 

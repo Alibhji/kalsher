@@ -1,5 +1,6 @@
 import type { MarketRow } from "../api";
 import { marketHasLiquidity } from "./filters";
+import { marketStore } from "../store/marketStore";
 
 /** Matches fetcher/config.yaml series_allowlist calendar order. */
 export const SERIES_ORDER = [
@@ -58,16 +59,26 @@ function strikeSortKey(m: MarketRow): number {
   return 0;
 }
 
+function liveVolume(m: MarketRow): number {
+  return parseVolume(marketStore.getRow(m.ticker)?.volume ?? m.volume);
+}
+
 function sortMarkets(rows: MarketRow[], sortSubByVolume: boolean): MarketRow[] {
   const sorted = [...rows];
   if (sortSubByVolume) {
     sorted.sort((a, b) => {
-      const volDiff = parseVolume(b.volume) - parseVolume(a.volume);
+      const volDiff = liveVolume(b) - liveVolume(a);
       if (volDiff !== 0) return volDiff;
-      return strikeSortKey(a) - strikeSortKey(b);
+      const strikeDiff = strikeSortKey(a) - strikeSortKey(b);
+      if (strikeDiff !== 0) return strikeDiff;
+      return a.ticker.localeCompare(b.ticker);
     });
   } else {
-    sorted.sort((a, b) => strikeSortKey(a) - strikeSortKey(b));
+    sorted.sort((a, b) => {
+      const strikeDiff = strikeSortKey(a) - strikeSortKey(b);
+      if (strikeDiff !== 0) return strikeDiff;
+      return a.ticker.localeCompare(b.ticker);
+    });
   }
   return sorted;
 }

@@ -100,12 +100,29 @@ class UiSettings(BaseSettings):
         return cls(**yaml_data)
 
 
+class FeeSettings(BaseSettings):
+    model: str = "kalshi"
+    maker_bps: int = 0
+
+
+class FillSettings(BaseSettings):
+    model: str = "book_walk"
+    require_trade_through: bool = False
+    max_slippage_e4: int = 200
+
+
+class GuardSettings(BaseSettings):
+    max_order_qty: float = 1000.0
+    max_position_per_market: float = 5000.0
+    reject_if_book_stale: bool = True
+
+
 class TraderSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     kalshi_key_id: str = ""
     kalshi_private_key_path: str = "/run/secrets/kalshi.pem"
-    kalshi_rest_base: str = "https://api.elections.kalshi.com/trade-api/v2"
+    kalshi_rest_base: str = "https://demo-api.kalshi.co/trade-api/v2"
     redis_url: str = "redis://redis:6379/0"
     timescale_dsn: str = "postgresql://kalshi:kalshi@timescaledb:5432/kalshi"
     debug: bool = False
@@ -113,6 +130,9 @@ class TraderSettings(BaseSettings):
     trading_live_enabled: bool = False
     mark_interval_sec: float = 1.0
     rest_rps: float = 10.0
+    fees: FeeSettings = Field(default_factory=FeeSettings)
+    fill: FillSettings = Field(default_factory=FillSettings)
+    guards: GuardSettings = Field(default_factory=GuardSettings)
 
     @classmethod
     def load(cls, config_path: str | None = None) -> "TraderSettings":
@@ -121,4 +141,7 @@ class TraderSettings(BaseSettings):
         if path.exists():
             with path.open() as f:
                 yaml_data = yaml.safe_load(f) or {}
+        for key in ("fees", "fill", "guards"):
+            if key in yaml_data and isinstance(yaml_data[key], dict):
+                yaml_data[key] = {"fees": FeeSettings, "fill": FillSettings, "guards": GuardSettings}[key](**yaml_data[key])
         return cls(**yaml_data)
