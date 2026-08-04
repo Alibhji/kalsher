@@ -38,7 +38,7 @@ ui/web/dist/
 .pnpm-debug.log*
 
 # IDE & OS
-.cursor/
+
 .vscode/
 .idea/
 *.swp
@@ -50,6 +50,9 @@ Thumbs.db
 # Docker / local scratch
 docker-compose.override.yml
 *.local.yaml
+
+# Ops watchdog output
+ops/logs/
 
 # Misc local notes
 forme.txt

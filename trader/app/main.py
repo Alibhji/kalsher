@@ -138,6 +138,8 @@ def create_app(settings: TraderSettings | None = None) -> FastAPI:
             asyncio.create_task(_every("fill_sync", state, 2.0, state.live_engine.sync_open_orders)),
             asyncio.create_task(_every("settle", state, 10.0, state.settle_expired_positions)),
             asyncio.create_task(_every("order_expiry", state, 10.0, state.cancel_expired_open_orders)),
+            # Startup + every 5m: keep local live positions aligned with Kalshi after restarts.
+            asyncio.create_task(_every("reconcile", state, 300.0, state.live_engine.reconcile_positions)),
             asyncio.create_task(_settle_listener(state)),
         ]
         try:

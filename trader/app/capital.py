@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from common.kalshi.rest import KalshiRest
+
+# Deposits change rarely; avoid re-paginating Kalshi on every /state poll.
+_DEPOSITS_TTL_S = 600.0
+_deposits_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _dep_ts(raw: dict[str, Any]) -> datetime:
@@ -41,13 +46,31 @@ async def _paginate_deposits(client: KalshiRest) -> list[dict[str, Any]]:
     return out
 
 
-async def fetch_all_kalshi_deposits(client: KalshiRest) -> list[dict[str, Any]]:
+async def fetch_all_kalshi_deposits(
+    client: KalshiRest,
+    *,
+    use_cache: bool = True,
+) -> list[dict[str, Any]]:
+    cache_key = str(id(client))
+    now = time.monotonic()
+    if use_cache:
+        hit = _deposits_cache.get(cache_key)
+        if hit and now - hit[0] < _DEPOSITS_TTL_S:
+            return [dict(r) for r in hit[1]]
+
     rows = await _paginate_deposits(client)
-    return [
+    applied = [
         normalize_kalshi_deposit(r)
         for r in rows
         if str(r.get("status") or "").lower() == "applied"
     ]
+    if use_cache:
+        _deposits_cache[cache_key] = (now, applied)
+    return [dict(r) for r in applied]
+
+
+def clear_deposits_cache() -> None:
+    _deposits_cache.clear()
 
 
 def cumulative_capital(deposits: list[dict[str, Any]], until: datetime | None = None) -> Decimal:

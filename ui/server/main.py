@@ -8,7 +8,7 @@ from pathlib import Path
 import asyncpg
 import redis.asyncio as aioredis
 import uvloop
-from aiohttp import web
+from aiohttp import ClientSession, web
 
 from common.logging import get_logger, setup_logging
 from common.settings import UiSettings
@@ -48,11 +48,13 @@ class UiApp:
         self._hub = MarketHub(web_base=settings.kalshi_web_base)
         self._feed: LiveFeed | None = None
         self._ws_manager: WsManager | None = None
+        self._http: ClientSession | None = None
         self._running = False
 
     async def start(self) -> None:
         self._redis = aioredis.from_url(self.settings.redis_url, decode_responses=True)
         self._pool = await asyncpg.create_pool(self.settings.timescale_dsn, min_size=1, max_size=5)
+        self._http = ClientSession()
         self._running = True
 
         assert self._redis is not None and self._pool is not None
@@ -70,6 +72,7 @@ class UiApp:
 
         app = web.Application()
         app["settings"] = self.settings
+        app["http"] = self._http
         app.router.add_get("/healthz", self._healthz)
         app.router.add_get("/metrics", self._metrics)
         app.router.add_get("/ws", self._ws)
@@ -112,6 +115,9 @@ class UiApp:
             await self._feed.stop()
         if self._ws_manager:
             await self._ws_manager.stop()
+        if self._http and not self._http.closed:
+            await self._http.close()
+            self._http = None
         if self._pool:
             await self._pool.close()
         if self._redis:

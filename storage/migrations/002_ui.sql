@@ -21,8 +21,10 @@ FROM ticks
 GROUP BY bucket, ticker
 WITH NO DATA;
 
+-- remove+add: if_not_exists does not skip when an existing policy uses different offsets
+SELECT remove_continuous_aggregate_policy('market_1s', if_exists => TRUE);
 SELECT add_continuous_aggregate_policy('market_1s',
-    start_offset => INTERVAL '1 hour',
+    start_offset => INTERVAL '15 minutes',
     end_offset => INTERVAL '1 second',
     schedule_interval => INTERVAL '1 minute',
     if_not_exists => TRUE);
@@ -42,8 +44,10 @@ FROM underlying_prices
 GROUP BY bucket, source, symbol
 WITH NO DATA;
 
+-- remove+add: if_not_exists does not skip when an existing policy uses different offsets
+SELECT remove_continuous_aggregate_policy('underlying_1s', if_exists => TRUE);
 SELECT add_continuous_aggregate_policy('underlying_1s',
-    start_offset => INTERVAL '1 hour',
+    start_offset => INTERVAL '15 minutes',
     end_offset => INTERVAL '1 second',
     schedule_interval => INTERVAL '1 minute',
     if_not_exists => TRUE);
